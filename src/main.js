@@ -659,11 +659,33 @@ function buildEscPosBytes(order, cfg) {
   const cols = paperWidth === 58 ? 32 : 48;
   const sep = '-'.repeat(cols);
 
+  // Tabela de conversão Unicode → CP860 (Português)
+  const _cp860Map = {
+    'À':0x83,'Á':0xB5,'Â':0xB6,'Ã':0xC7,'Ä':0x8E,'Å':0x8F,
+    'à':0x85,'á':0xA0,'â':0x83,'ã':0xC6,'ä':0x84,'å':0x86,
+    'È':0x91,'É':0x90,'Ê':0xD2,'Ë':0xD3,
+    'è':0x8A,'é':0x82,'ê':0x88,'ë':0x89,
+    'Ì':0xDE,'Í':0xD6,'Î':0xD7,'Ï':0xD8,
+    'ì':0x8D,'í':0xA1,'î':0x8C,'ï':0x8B,
+    'Ò':0xE3,'Ó':0xE0,'Ô':0xE2,'Õ':0xE5,'Ö':0x99,
+    'ò':0x95,'ó':0xA2,'ô':0x93,'õ':0xE4,'ö':0x94,
+    'Ù':0xEA,'Ú':0xE9,'Û':0xEB,'Ü':0x9A,
+    'ù':0x97,'ú':0xA3,'û':0x96,'ü':0x81,
+    'Ç':0x80,'ç':0x87,
+    'Ñ':0xA5,'ñ':0xA4,
+    'º':0xA8,'ª':0xA6,
+    '€':0xD5,'£':0x9C,'°':0xF8,
+    '¿':0xA8,'¡':0xAD,
+  };
   const write = (str) => {
-    // Converte pra Latin1 (cp437/cp850 que térmicas usam)
     for (let i = 0; i < str.length; i++) {
-      const c = str.charCodeAt(i);
-      buf.push(c > 255 ? 63 : c); // ? para caracteres fora de range
+      const ch = str[i];
+      if (_cp860Map[ch] !== undefined) {
+        buf.push(_cp860Map[ch]);
+      } else {
+        const c = str.charCodeAt(i);
+        buf.push(c > 127 ? 63 : c); // '?' para caracteres sem mapeamento
+      }
     }
   };
   const raw = (...bytes) => bytes.forEach(b => buf.push(b));
@@ -675,17 +697,22 @@ function buildEscPosBytes(order, cfg) {
     return left + (space > 0 ? ' '.repeat(space) : ' ') + right;
   };
 
+  // Calcula escala ESC/POS a partir do fontSize configurado
+  // fontSize 10-12 → normal (0x00), 13-15 → altura dupla (0x01), 16+ → dupla largura+altura (0x11)
+  const fontSize = cfg.fontSize || 12;
+  const fontScale = fontSize >= 16 ? 0x11 : fontSize >= 13 ? 0x01 : 0x00;
+
   // ESC @ — Reset
   raw(0x1B, 0x40);
 
-  // Codepage 860 (Português)
+  // Codepage 860 (Português — suporta ç, ã, á, etc.)
   raw(0x1B, 0x74, 0x03);
 
   // ── Cabeçalho ──
   raw(0x1B, 0x61, 0x01); // Centralizar
-  raw(0x1D, 0x21, 0x11); // Fonte dupla largura+altura
+  raw(0x1D, 0x21, 0x11); // Fonte dupla largura+altura (cabeçalho sempre grande)
   line(cfg.nome);
-  raw(0x1D, 0x21, 0x00); // Fonte normal
+  raw(0x1D, 0x21, fontScale); // Tamanho configurado pelo usuário
   if (cfg.sub) line(cfg.sub);
   raw(0x1B, 0x61, 0x00); // Alinhar esquerda
   line(sep);
@@ -714,6 +741,7 @@ function buildEscPosBytes(order, cfg) {
   line(sep);
 
   // ── Totais ──
+  raw(0x1D, 0x21, 0x00); // Fonte normal para totais
   const subtotal = items.reduce((s, i) => s + (parseFloat(i.price || 0) * (i.qty || 1)), 0);
   const taxa = parseFloat(order.taxa || 0);
   const total = subtotal + taxa;
