@@ -295,20 +295,64 @@ async function printSilentElectron(html, opts = {}) {
     // PASSO 4: Imprime o PDF silenciosamente
     try {
       const ptp = require('pdf-to-printer');
-      const printOpts = {};
+      const printOpts = {
+        scale: 'noscale',  // NÃO redimensionar — envia no tamanho real
+      };
       if (printer) printOpts.printer = printer;
       await ptp.print(pdfFile, printOpts);
-      log('✅ Impresso via pdf-to-printer' + (printer ? ' → ' + printer : ''));
+      log('✅ Impresso via pdf-to-printer (noscale)' + (printer ? ' → ' + printer : ''));
     } catch (ptpErr) {
-      log('⚠️ pdf-to-printer falhou:', ptpErr.message);
+      log('⚠️ pdf-to-printer falhou:', ptpErr.message, '| Tentando SumatraPDF direto...');
+
+      // Fallback: chama SumatraPDF empacotado pelo pdf-to-printer
       const { exec } = require('child_process');
-      const cmd = printer
-        ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo '${printer}' -WindowStyle Hidden"`
-        : `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb Print -WindowStyle Hidden"`;
-      await new Promise((resolve) => {
-        exec(cmd, { timeout: 15000 }, () => resolve());
-      });
-      log('✅ Impresso via PowerShell');
+      let sumatraPath;
+      try {
+        const ptpPath = require.resolve('pdf-to-printer');
+        const ptpDir = path.dirname(ptpPath);
+        // pdf-to-printer embute SumatraPDF em dist/
+        const possible = [
+          path.join(ptpDir, 'SumatraPDF.exe'),
+          path.join(ptpDir, '..', 'SumatraPDF.exe'),
+          path.join(ptpDir, 'SumatraPDF-3.4.6-64.exe'),
+          path.join(ptpDir, '..', 'SumatraPDF-3.4.6-64.exe'),
+        ];
+        for (const p of possible) {
+          if (fs.existsSync(p)) { sumatraPath = p; break; }
+        }
+      } catch {}
+
+      // Tenta também em Program Files
+      if (!sumatraPath) {
+        const paths = [
+          'C:\\Program Files\\SumatraPDF\\SumatraPDF.exe',
+          'C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe',
+          path.join(process.env.LOCALAPPDATA || '', 'SumatraPDF', 'SumatraPDF.exe'),
+        ];
+        for (const p of paths) {
+          try { if (fs.existsSync(p)) { sumatraPath = p; break; } } catch {}
+        }
+      }
+
+      if (sumatraPath) {
+        const cmd = printer
+          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "noscale" -silent "${pdfFile}"`
+          : `"${sumatraPath}" -print-to-default -print-settings "noscale" -silent "${pdfFile}"`;
+        log('🖨️ SumatraPDF:', cmd);
+        await new Promise((resolve) => {
+          exec(cmd, { timeout: 15000 }, () => resolve());
+        });
+        log('✅ Impresso via SumatraPDF direto');
+      } else {
+        // Último fallback: PowerShell
+        const cmd = printer
+          ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo '${printer}' -WindowStyle Hidden"`
+          : `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb Print -WindowStyle Hidden"`;
+        await new Promise((resolve) => {
+          exec(cmd, { timeout: 15000 }, () => resolve());
+        });
+        log('✅ Impresso via PowerShell');
+      }
     }
 
     // Limpa
