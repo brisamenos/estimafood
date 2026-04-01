@@ -110,6 +110,23 @@ function createWindow() {
 
   mainWindow.on('closed', () => { mainWindow = null; });
 
+  // ── Permissões WebUSB (necessário para Parear impressora USB) ──
+  mainWindow.webContents.session.on('select-usb-device', (event, details, callback) => {
+    event.preventDefault();
+    const printer = details.deviceList[0];
+    callback(printer ? printer.deviceId : '');
+  });
+
+  mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission) => {
+    if (permission === 'usb') return true;
+    return true;
+  });
+
+  mainWindow.webContents.session.setDevicePermissionHandler((details) => {
+    if (details.deviceType === 'usb') return true;
+    return false;
+  });
+
   // Links externos abrem no navegador
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http')) shell.openExternal(url);
@@ -776,6 +793,9 @@ function setupAutoStart() {
 
 // ── App lifecycle ───────────────────────────────────────────
 app.whenReady().then(() => {
+  // Habilita WebUSB (necessário para parear impressora USB)
+  app.commandLine.appendSwitch('enable-experimental-web-platform-features');
+
   setupIPC();
   createWindow();
   createTray();
