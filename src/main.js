@@ -121,6 +121,51 @@ function createWindow() {
     mainWindow.webContents.insertCSS(`
       .pwa-install-banner, .update-toast { display: none !important; }
     `).catch(() => {});
+
+    // ── Restaura sessão persistida no sessionStorage ──────────────────
+    // Intercepta setItem/removeItem de sys_session para sincronizar com
+    // o electron-store. Transparente para o login e para o gestor.
+    mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        if (!window.ElectronPrint) return;
+
+        // Patch sessionStorage — persiste sys_session no Electron
+        const _origSet    = sessionStorage.setItem.bind(sessionStorage);
+        const _origRemove = sessionStorage.removeItem.bind(sessionStorage);
+        const _origClear  = sessionStorage.clear.bind(sessionStorage);
+
+        sessionStorage.setItem = function(key, value) {
+          _origSet(key, value);
+          if (key === 'sys_session') window.ElectronPrint.saveSession(value);
+        };
+        sessionStorage.removeItem = function(key) {
+          _origRemove(key);
+          if (key === 'sys_session') window.ElectronPrint.clearSession();
+        };
+        sessionStorage.clear = function() {
+          _origClear();
+          window.ElectronPrint.clearSession();
+        };
+
+        // Restaura sessão salva se o sessionStorage ainda estiver vazio
+        if (!sessionStorage.getItem('sys_session')) {
+          const saved = await window.ElectronPrint.loadSession();
+          if (saved) {
+            try {
+              // Renova o timestamp para que a verificação de 8h não expire
+              // na abertura do app (reinicia o contador a cada session restore)
+              const sess = JSON.parse(saved);
+              sess.ts = Date.now();
+              const refreshed = JSON.stringify(sess);
+              _origSet('sys_session', refreshed);
+              window.ElectronPrint.saveSession(refreshed);
+            } catch(e) {
+              _origSet('sys_session', saved);
+            }
+          }
+        }
+      })();
+    `).catch(() => {});
   });
 }
 
@@ -416,7 +461,7 @@ async function printEscPosUsb(order, cfg) {
           printer
             .align('lt')
             .drawLine()
-            .text('Pedido: #' + order.id)
+            .text('Pedido: #' + (order.num ?? order.id))
             .text('Data: ' + now)
             .text('Cliente: ' + (order.client || '—'));
 
@@ -649,7 +694,7 @@ function buildEscPosBytes(order, cfg) {
   const now = new Date().toLocaleString('pt-BR', {
     day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'
   });
-  line('Pedido: #' + order.id);
+  line('Pedido: #' + (order.num ?? order.id));
   line('Data: ' + now);
   line('Cliente: ' + (order.client || '-'));
   if (order.addr) line('Local: ' + order.addr);
@@ -840,7 +885,7 @@ function buildTicketHtml(order, cfg) {
     <div class="pt-center pt-large">${cfg.nome || 'ESTIMA FOOD'}</div>
     ${cfg.sub ? `<div class="pt-center" style="font-size:11px">${cfg.sub}</div>` : ''}
     <hr class="pt-hr">
-    <div>Pedido: <b>#${order.id}</b></div>
+    <div>Pedido: <b>#${order.num ?? order.id}</b></div>
     <div>Data: ${now}</div>
     <div>Cliente: ${order.client || '—'}</div>
     ${order.addr ? `<div>Local: ${order.addr}</div>` : ''}
@@ -913,6 +958,21 @@ function setupIPC() {
     } catch (e) {
       return { ok: false, error: e.message };
     }
+  });
+
+  // ── Sessão persistente — salva/restaura credenciais entre reinicializações ──
+  ipcMain.handle('session:save', async (_e, data) => {
+    store.set('persistedSession', data);
+    return { ok: true };
+  });
+
+  ipcMain.handle('session:load', async () => {
+    return store.get('persistedSession') || null;
+  });
+
+  ipcMain.handle('session:clear', async () => {
+    store.delete('persistedSession');
+    return { ok: true };
   });
 
   // Notificação nativa
