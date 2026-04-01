@@ -46,42 +46,6 @@ jobs:
             dist/latest.yml
           if-no-files-found: warn
 
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libudev-dev libusb-1.0-0-dev
-
-      - name: Install dependencies
-        run: npm install
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build
-        run: npm run build:linux
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: anotai-print-linux
-          path: |
-            dist/*.AppImage
-            dist/*.deb
-            dist/latest-linux.yml
-          if-no-files-found: warn
-
   release:
     needs: [build-windows]
     runs-on: ubuntu-latest
