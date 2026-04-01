@@ -1,6 +1,6 @@
 /**
  * ╔══════════════════════════════════════════════════════════╗
- * ║  ANOTAÍ PRINT — Electron Main Process                   ║
+ * ║  ESTIMAFOOD PRINT — Electron Main Process                   ║
  * ║  Impressão 100% silenciosa para impressoras térmicas    ║
  * ╚══════════════════════════════════════════════════════════╝
  */
@@ -17,7 +17,7 @@ const store = new Store({
     printer: '',
     paperWidth: 80,
     fontSize: 12,
-    nome: 'ANOTAÍ',
+    nome: 'ESTIMA FOOD',
     sub: '',
     rodape: 'Obrigado pela preferência!',
     autoStart: true,
@@ -60,7 +60,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     icon: getIcon(),
-    title: 'Anotaí Print',
+    title: 'EstimaFood Print',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -135,7 +135,7 @@ function createTray() {
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: '📋 Abrir Anotaí',
+      label: '📋 Abrir EstimaFood',
       click: () => {
         if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
         else createWindow();
@@ -184,7 +184,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('Anotaí Print — Impressão Automática');
+  tray.setToolTip('EstimaFood Print — Impressão Automática');
   tray.setContextMenu(contextMenu);
   tray.on('double-click', () => {
     if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
@@ -202,51 +202,65 @@ async function printSilentElectron(html, opts = {}) {
   const paperWidth = opts.paperWidth || store.get('paperWidth') || 80;
   const copies = opts.copies || store.get('printCopies') || 1;
   const widthMm = paperWidth === 58 ? 58 : 80;
-  const widthPx = paperWidth === 58 ? 219 : 302;
 
   const cleanHtml = html.includes('<html') ? html.replace(/.*<body[^>]*>/is,'').replace(/<\/body>.*/is,'') : html;
 
-  const fullHtml = `<!DOCTYPE html><html><head>
-<meta charset="utf-8">
+  // PASSO 1: Renderiza numa janela pra medir a altura
+  const measureHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'Courier New',monospace; font-size:12px; color:#000; background:#fff; width:${widthPx}px; margin:0; padding:4px; }
+  body { font-family:'Courier New',monospace; font-size:12px; color:#000; background:#fff; width:${widthMm}mm; padding:2mm; }
   hr,.pt-hr { border:none; border-top:1px dashed #000; margin:4px 0; }
-  .pt-center { text-align:center; }
-  .pt-large { font-size:15px; font-weight:bold; }
+  .pt-center { text-align:center; } .pt-large { font-size:15px; font-weight:bold; }
   .print-ticket { padding:0; width:100%; }
-</style>
-</head><body>${cleanHtml}</body></html>`;
+</style></head><body>${cleanHtml}</body></html>`;
 
-  // Salva HTML num arquivo temporário
-  const tmpFile = path.join(os.tmpdir(), 'anotai-print-' + Date.now() + '.html');
-  fs.writeFileSync(tmpFile, fullHtml, 'utf-8');
+  const measureFile = path.join(os.tmpdir(), 'anotai-measure-' + Date.now() + '.html');
+  fs.writeFileSync(measureFile, measureHtml, 'utf-8');
+
+  const measureWin = new BrowserWindow({
+    show: false, width: 800, height: 2000,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+
+  await measureWin.loadFile(measureFile);
+  await new Promise(r => setTimeout(r, 600));
+
+  const contentHeight = await measureWin.webContents.executeJavaScript('document.body.scrollHeight');
+  const heightMm = Math.ceil(contentHeight * 0.265) + 15; // px to mm + margem
+  measureWin.close();
+  try { fs.unlinkSync(measureFile); } catch {}
+
+  log('🖨️ Medido:', contentHeight + 'px →', heightMm + 'mm | largura:', widthMm + 'mm');
+
+  // PASSO 2: Gera HTML com @page size exato (CSS controla o PDF)
+  const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  @page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Courier New',monospace; font-size:12px; color:#000 !important; background:#fff !important; width:${widthMm}mm; padding:2mm; -webkit-print-color-adjust:exact; }
+  hr,.pt-hr { border:none; border-top:1px dashed #000; margin:4px 0; }
+  .pt-center { text-align:center; } .pt-large { font-size:15px; font-weight:bold; }
+  .print-ticket { padding:0; width:100%; }
+  div,span,b,strong { color:#000 !important; }
+</style></head><body>${cleanHtml}</body></html>`;
+
+  const printFile = path.join(os.tmpdir(), 'anotai-print-' + Date.now() + '.html');
+  fs.writeFileSync(printFile, printHtml, 'utf-8');
 
   const printWin = new BrowserWindow({
-    show: false,
-    width: widthPx,
-    height: 2000,
+    show: false, width: 800, height: 2000,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
 
   try {
-    await printWin.loadFile(tmpFile);
-    await new Promise(r => setTimeout(r, 800));
+    await printWin.loadFile(printFile);
+    await new Promise(r => setTimeout(r, 600));
 
-    // Mede altura real do conteúdo
-    const contentHeight = await printWin.webContents.executeJavaScript(
-      'document.body.scrollHeight'
-    );
-    log('🖨️ Conteúdo:', contentHeight + 'px | papel:', widthMm + 'mm | impressora:', printer || 'padrão');
-
-    // Gera PDF com tamanho exato do cupom (inches para Chromium)
-    const widthInches = widthMm / 25.4;
-    const heightInches = Math.max((contentHeight * 0.26458 + 10) / 25.4, 2);
-
+    // PASSO 3: Gera PDF — preferCSSPageSize faz o Chromium usar o @page do CSS
     const pdfBuffer = await printWin.webContents.printToPDF({
+      preferCSSPageSize: true,
       printBackground: true,
-      preferCSSPageSize: false,
-      pageSize: { width: widthInches, height: heightInches },
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
@@ -254,43 +268,35 @@ async function printSilentElectron(html, opts = {}) {
 
     const pdfFile = path.join(os.tmpdir(), 'anotai-receipt-' + Date.now() + '.pdf');
     fs.writeFileSync(pdfFile, pdfBuffer);
-    log('📄 PDF gerado:', Math.round(pdfBuffer.length / 1024) + 'KB |', Math.round(widthInches * 25.4) + 'mm x', Math.round(heightInches * 25.4) + 'mm');
+    log('📄 PDF:', Math.round(pdfBuffer.length / 1024) + 'KB | tamanho:', widthMm + 'x' + heightMm + 'mm');
 
-    // ── Imprime com pdf-to-printer (100% silencioso no Windows) ──
+    // PASSO 4: Imprime o PDF silenciosamente
     try {
       const ptp = require('pdf-to-printer');
       const printOpts = {};
       if (printer) printOpts.printer = printer;
-
       await ptp.print(pdfFile, printOpts);
       log('✅ Impresso via pdf-to-printer' + (printer ? ' → ' + printer : ''));
     } catch (ptpErr) {
-      log('⚠️ pdf-to-printer falhou:', ptpErr.message, '| Tentando fallback...');
-
-      // Fallback: PowerShell direto
+      log('⚠️ pdf-to-printer falhou:', ptpErr.message);
       const { exec } = require('child_process');
       const cmd = printer
-        ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo -ArgumentList '${printer}' -WindowStyle Hidden"`
+        ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo '${printer}' -WindowStyle Hidden"`
         : `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb Print -WindowStyle Hidden"`;
-
       await new Promise((resolve) => {
-        exec(cmd, { timeout: 15000 }, (err) => {
-          if (err) log('⚠️ PowerShell:', err.message);
-          resolve();
-        });
+        exec(cmd, { timeout: 15000 }, () => resolve());
       });
-      log('✅ Impresso via PowerShell fallback');
+      log('✅ Impresso via PowerShell');
     }
 
-    // Limpa arquivos temporários
-    try { fs.unlinkSync(tmpFile); } catch {}
+    // Limpa
+    try { fs.unlinkSync(printFile); } catch {}
     setTimeout(() => { try { fs.unlinkSync(pdfFile); } catch {} }, 5000);
-
     return { ok: true };
 
   } catch (e) {
     try { printWin.close(); } catch {}
-    try { fs.unlinkSync(tmpFile); } catch {}
+    try { fs.unlinkSync(printFile); } catch {}
     log('❌ Impressão falhou:', e.message);
     throw e;
   }
@@ -333,7 +339,7 @@ async function printEscPosUsb(order, cfg) {
             .align('ct')
             .style('b')
             .size(1, 1)
-            .text(cfg.nome || store.get('nome') || 'ANOTAÍ')
+            .text(cfg.nome || store.get('nome') || 'ESTIMA FOOD')
             .style('normal')
             .size(0, 0);
 
@@ -442,7 +448,7 @@ async function printEscPosNetwork(order, cfg) {
 
         printer
           .align('ct').style('b').size(1, 1)
-          .text(cfg.nome || store.get('nome') || 'ANOTAÍ')
+          .text(cfg.nome || store.get('nome') || 'ESTIMA FOOD')
           .style('normal').size(0, 0);
 
         if (cfg.sub || store.get('sub')) printer.text(cfg.sub || store.get('sub'));
@@ -570,7 +576,7 @@ function buildTicketHtml(order, cfg) {
   });
 
   return `<div class="print-ticket" style="font-size:${fs}px">
-    <div class="pt-center pt-large">${cfg.nome || 'ANOTAÍ'}</div>
+    <div class="pt-center pt-large">${cfg.nome || 'ESTIMA FOOD'}</div>
     ${cfg.sub ? `<div class="pt-center" style="font-size:11px">${cfg.sub}</div>` : ''}
     <hr class="pt-hr">
     <div>Pedido: <b>#${order.id}</b></div>
@@ -704,7 +710,7 @@ function setupUpdater() {
       log('📦 Atualização disponível:', info.version);
       if (Notification.isSupported()) {
         new Notification({
-          title: 'Anotaí Print — Atualização',
+          title: 'EstimaFood Print — Atualização',
           body: `Versão ${info.version} disponível. Baixando...`,
           icon: getIcon(),
         }).show();
@@ -715,7 +721,7 @@ function setupUpdater() {
       log('✅ Atualização baixada:', info.version);
       if (Notification.isSupported()) {
         new Notification({
-          title: 'Anotaí Print — Pronta!',
+          title: 'EstimaFood Print — Pronta!',
           body: 'A atualização será instalada ao reiniciar.',
           icon: getIcon(),
         }).show();
@@ -765,7 +771,7 @@ app.whenReady().then(() => {
     else if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
   });
 
-  log('✅ Anotaí Print iniciado | versão:', app.getVersion());
+  log('✅ EstimaFood Print iniciado | versão:', app.getVersion());
 });
 
 app.on('before-quit', () => { isQuitting = true; });
