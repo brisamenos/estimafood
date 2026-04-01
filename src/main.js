@@ -416,7 +416,7 @@ async function printEscPosUsb(order, cfg) {
           printer
             .align('lt')
             .drawLine()
-            .text('Pedido: #' + order.id)
+            .text('Pedido: #' + (order.num || order.id))
             .text('Data: ' + now)
             .text('Cliente: ' + (order.client || '—'));
 
@@ -520,7 +520,7 @@ async function printEscPosNetwork(order, cfg) {
         if (cfg.sub || store.get('sub')) printer.text(cfg.sub || store.get('sub'));
 
         printer.align('lt').drawLine()
-          .text('Pedido: #' + order.id)
+          .text('Pedido: #' + (order.num || order.id))
           .text('Data: ' + now)
           .text('Cliente: ' + (order.client || '—'));
 
@@ -667,7 +667,7 @@ function buildEscPosBytes(order, cfg) {
   const now = new Date().toLocaleString('pt-BR', {
     day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'
   });
-  line('Pedido: #' + order.id);
+  line('Pedido: #' + (order.num || order.id));
   line('Data: ' + now);
   line('Cliente: ' + (order.client || '-'));
   if (order.addr) line('Local: ' + order.addr);
@@ -851,14 +851,16 @@ function buildTicketHtml(order, cfg) {
 
   let obsLines = '';
   items.forEach(i => {
-    if (i.obs) obsLines += `<div style="font-size:${fs - 1}px;color:#333">  ↳ ${i.obs}</div>`;
+    if (i.obs) obsLines += `<div style="font-size:0.9em;color:#333">  ↳ ${i.obs}</div>`;
   });
+
+  const orderNum = order.num || order.id;
 
   return `<div class="print-ticket" style="font-size:${fs}px">
     <div class="pt-center pt-large">${cfg.nome || 'ESTIMA FOOD'}</div>
-    ${cfg.sub ? `<div class="pt-center" style="font-size:11px">${cfg.sub}</div>` : ''}
+    ${cfg.sub ? `<div class="pt-center" style="font-size:0.85em">${cfg.sub}</div>` : ''}
     <hr class="pt-hr">
-    <div>Pedido: <b>#${order.id}</b></div>
+    <div>Pedido: <b>#${orderNum}</b></div>
     <div>Data: ${now}</div>
     <div>Cliente: ${order.client || '—'}</div>
     ${order.addr ? `<div>Local: ${order.addr}</div>` : ''}
@@ -871,7 +873,7 @@ function buildTicketHtml(order, cfg) {
     <div style="display:flex;justify-content:space-between;font-weight:bold"><span>TOTAL</span><span>${money(total)}</span></div>
     ${order.pag ? `<div>Pagamento: ${order.pag}</div>` : ''}
     <hr class="pt-hr">
-    <div class="pt-center" style="font-size:11px">${cfg.rodape || 'Obrigado!'}</div>
+    <div class="pt-center" style="font-size:0.85em">${cfg.rodape || 'Obrigado!'}</div>
   </div>`;
 }
 
