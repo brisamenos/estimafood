@@ -575,44 +575,239 @@ async function printEscPosNetwork(order, cfg) {
 
 // ── Roteador de impressão ───────────────────────────────────
 async function printOrder(order) {
-  const method = store.get('printMethod') || 'electron';
   const cfg = {
-    nome: store.get('nome'),
-    sub: store.get('sub'),
-    rodape: store.get('rodape'),
-    paperWidth: store.get('paperWidth'),
-    fontSize: store.get('fontSize'),
-    printer: store.get('printer'),
-    networkIp: store.get('networkPrinterIp'),
-    networkPort: store.get('networkPrinterPort'),
+    nome: store.get('nome') || 'ESTIMA FOOD',
+    sub: store.get('sub') || '',
+    rodape: store.get('rodape') || 'Obrigado pela preferência!',
+    paperWidth: store.get('paperWidth') || 80,
+    fontSize: store.get('fontSize') || 12,
+    printer: store.get('printer') || '',
   };
 
-  log('🖨️ Imprimindo pedido #' + order.id, '| método:', method);
+  log('🖨️ Imprimindo pedido #' + order.id, '| impressora:', cfg.printer || 'padrão', '| papel:', cfg.paperWidth + 'mm');
 
-  // Tenta o método configurado, com fallback para electron
-  const attempts = [method, 'electron'].filter((v, i, a) => a.indexOf(v) === i);
+  // ── MÉTODO PRINCIPAL: ESC/POS RAW (funciona com qualquer térmica) ──
+  try {
+    return await printRawEscPos(order, cfg);
+  } catch (e) {
+    log('⚠️ ESC/POS raw falhou:', e.message);
+  }
 
-  for (const m of attempts) {
-    try {
-      switch (m) {
-        case 'escpos-usb':
-          return await printEscPosUsb(order, cfg);
+  // ── FALLBACK: PDF via pdf-to-printer ──
+  try {
+    const html = buildTicketHtml(order, cfg);
+    return await printSilentElectron(html, cfg);
+  } catch (e) {
+    log('❌ Todos os métodos falharam:', e.message);
+    throw e;
+  }
+}
 
-        case 'escpos-network':
-          return await printEscPosNetwork(order, cfg);
+// ══════════════════════════════════════════════════════════════
+// ESC/POS RAW — Envia bytes diretos à impressora térmica
+// Funciona com QUALQUER térmica 58mm/80mm no Windows
+// ══════════════════════════════════════════════════════════════
 
-        case 'electron':
-        default: {
-          // Gera HTML do ticket e imprime via Electron silent print
-          const html = buildTicketHtml(order, cfg);
-          return await printSilentElectron(html, cfg);
+function buildEscPosBytes(order, cfg) {
+  const buf = [];
+  const paperWidth = cfg.paperWidth || 80;
+  const cols = paperWidth === 58 ? 32 : 48;
+  const sep = '-'.repeat(cols);
+
+  const write = (str) => {
+    // Converte pra Latin1 (cp437/cp850 que térmicas usam)
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      buf.push(c > 255 ? 63 : c); // ? para caracteres fora de range
+    }
+  };
+  const raw = (...bytes) => bytes.forEach(b => buf.push(b));
+  const line = (str) => { write(str); raw(0x0A); };
+
+  const money = v => 'R$ ' + parseFloat(v || 0).toFixed(2).replace('.', ',');
+  const pad2col = (left, right) => {
+    const space = cols - left.length - right.length;
+    return left + (space > 0 ? ' '.repeat(space) : ' ') + right;
+  };
+
+  // ESC @ — Reset
+  raw(0x1B, 0x40);
+
+  // Codepage 860 (Português)
+  raw(0x1B, 0x74, 0x03);
+
+  // ── Cabeçalho ──
+  raw(0x1B, 0x61, 0x01); // Centralizar
+  raw(0x1D, 0x21, 0x11); // Fonte dupla largura+altura
+  line(cfg.nome);
+  raw(0x1D, 0x21, 0x00); // Fonte normal
+  if (cfg.sub) line(cfg.sub);
+  raw(0x1B, 0x61, 0x00); // Alinhar esquerda
+  line(sep);
+
+  // ── Dados do pedido ──
+  const now = new Date().toLocaleString('pt-BR', {
+    day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'
+  });
+  line('Pedido: #' + order.id);
+  line('Data: ' + now);
+  line('Cliente: ' + (order.client || '-'));
+  if (order.addr) line('Local: ' + order.addr);
+  if (order.mesa_num) line('Mesa: ' + order.mesa_num);
+  if (order.pag) line('Pagto: ' + order.pag);
+  line(sep);
+
+  // ── Itens ──
+  const items = Array.isArray(order.items) ? order.items : [];
+  const maxName = cols - 14;
+  items.forEach(i => {
+    const name = (i.qty + 'x ' + i.name).toUpperCase().substring(0, maxName);
+    const price = money((i.price || 0) * (i.qty || 1));
+    line(pad2col(name, price));
+    if (i.obs) line('  * ' + i.obs);
+  });
+  line(sep);
+
+  // ── Totais ──
+  const subtotal = items.reduce((s, i) => s + (parseFloat(i.price || 0) * (i.qty || 1)), 0);
+  const taxa = parseFloat(order.taxa || 0);
+  const total = subtotal + taxa;
+
+  if (taxa > 0) {
+    line(pad2col('Subtotal', money(subtotal)));
+    line(pad2col('Taxa entrega', money(taxa)));
+  }
+  raw(0x1B, 0x45, 0x01); // Negrito ON
+  line(pad2col('TOTAL', money(total)));
+  raw(0x1B, 0x45, 0x00); // Negrito OFF
+  line(sep);
+
+  // ── Rodapé ──
+  raw(0x1B, 0x61, 0x01); // Centralizar
+  line(cfg.rodape);
+  raw(0x1B, 0x61, 0x00); // Esquerda
+
+  // Avança papel e corta
+  raw(0x0A, 0x0A, 0x0A, 0x0A);
+  raw(0x1D, 0x56, 0x42, 0x03); // GS V — corte parcial
+
+  return Buffer.from(buf);
+}
+
+async function printRawEscPos(order, cfg) {
+  const printerName = cfg.printer || '';
+  const data = buildEscPosBytes(order, cfg);
+
+  log('🖨️ ESC/POS raw:', data.length, 'bytes | impressora:', printerName || 'padrão');
+
+  // Salva bytes num arquivo temporário
+  const tmpFile = path.join(os.tmpdir(), 'ef-raw-' + Date.now() + '.bin');
+  fs.writeFileSync(tmpFile, data);
+
+  // DEBUG: salva cópia
+  try {
+    const desktop = path.join(os.homedir(), 'Desktop');
+    fs.writeFileSync(path.join(desktop, 'EstimaFood-DEBUG.bin'), data);
+  } catch {}
+
+  const { exec } = require('child_process');
+
+  if (process.platform === 'win32') {
+    // Descobre o nome da impressora
+    let targetPrinter = printerName;
+
+    if (!targetPrinter) {
+      // Pega impressora padrão do Windows
+      try {
+        targetPrinter = await new Promise((resolve, reject) => {
+          exec('powershell -Command "(Get-WmiObject -Query \\"SELECT * FROM Win32_Printer WHERE Default=TRUE\\").Name"',
+            (err, stdout) => {
+              if (err) reject(err);
+              else resolve(stdout.trim());
+            });
+        });
+        log('🖨️ Impressora padrão:', targetPrinter);
+      } catch (e) {
+        log('⚠️ Não conseguiu pegar impressora padrão:', e.message);
+        throw new Error('Nenhuma impressora configurada');
+      }
+    }
+
+    // Método 1: Envia RAW via PowerShell (mais confiável)
+    const ps1 = `
+      $printerName = '${targetPrinter.replace(/'/g, "''")}'
+      $data = [System.IO.File]::ReadAllBytes('${tmpFile.replace(/\\/g, '\\\\')}')
+      $printer = New-Object System.Drawing.Printing.PrintDocument
+      $printer.PrinterSettings.PrinterName = $printerName
+      
+      # Abre porta RAW
+      Add-Type -TypeDefinition @"
+      using System;
+      using System.Runtime.InteropServices;
+      public class RawPrint {
+        [StructLayout(LayoutKind.Sequential)] public struct DOCINFOA { public string pDocName; public string pOutputFile; public string pDatatype; }
+        [DllImport("winspool.drv", SetLastError=true, CharSet=CharSet.Ansi)] public static extern bool OpenPrinter(string p, out IntPtr h, IntPtr d);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartDocPrinter(IntPtr h, int l, ref DOCINFOA di);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr h);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool WritePrinter(IntPtr h, byte[] buf, int cb, out int written);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr h);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndDocPrinter(IntPtr h);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool ClosePrinter(IntPtr h);
+        
+        public static bool Send(string printer, byte[] data) {
+          IntPtr h;
+          if (!OpenPrinter(printer, out h, IntPtr.Zero)) return false;
+          var di = new DOCINFOA { pDocName = "EstimaFood", pDatatype = "RAW" };
+          StartDocPrinter(h, 1, ref di);
+          StartPagePrinter(h);
+          int written;
+          WritePrinter(h, data, data.Length, out written);
+          EndPagePrinter(h);
+          EndDocPrinter(h);
+          ClosePrinter(h);
+          return written == data.Length;
         }
       }
-    } catch (e) {
-      log(`⚠️ Método ${m} falhou:`, e.message);
-      if (m === attempts[attempts.length - 1]) throw e;
-      log('🔄 Tentando próximo método...');
-    }
+"@
+      
+      $ok = [RawPrint]::Send($printerName, $data)
+      if ($ok) { Write-Output "OK" } else { Write-Error "FAIL" }
+    `;
+
+    const ps1File = path.join(os.tmpdir(), 'ef-print-' + Date.now() + '.ps1');
+    fs.writeFileSync(ps1File, ps1, 'utf-8');
+
+    return new Promise((resolve, reject) => {
+      exec(`powershell -ExecutionPolicy Bypass -File "${ps1File}"`, { timeout: 15000 }, (err, stdout, stderr) => {
+        // Limpa
+        try { fs.unlinkSync(tmpFile); } catch {}
+        try { fs.unlinkSync(ps1File); } catch {}
+
+        if (stdout && stdout.includes('OK')) {
+          log('✅ Impresso via RAW direto na', targetPrinter);
+          resolve({ ok: true });
+        } else if (err || stderr) {
+          log('❌ RAW falhou:', stderr || err?.message);
+          reject(new Error(stderr || err?.message || 'Falha RAW'));
+        } else {
+          log('✅ Enviado à impressora (sem confirmação)');
+          resolve({ ok: true });
+        }
+      });
+    });
+
+  } else {
+    // Linux/Mac: lp -o raw
+    const cmd = printerName
+      ? `lp -d "${printerName}" -o raw "${tmpFile}"`
+      : `lp -o raw "${tmpFile}"`;
+    return new Promise((resolve, reject) => {
+      exec(cmd, { timeout: 15000 }, (err) => {
+        try { fs.unlinkSync(tmpFile); } catch {}
+        if (err) reject(err);
+        else resolve({ ok: true });
+      });
+    });
   }
 }
 
