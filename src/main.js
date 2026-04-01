@@ -110,23 +110,6 @@ function createWindow() {
 
   mainWindow.on('closed', () => { mainWindow = null; });
 
-  // ── Permissões WebUSB (necessário para Parear impressora USB) ──
-  mainWindow.webContents.session.on('select-usb-device', (event, details, callback) => {
-    event.preventDefault();
-    const printer = details.deviceList[0];
-    callback(printer ? printer.deviceId : '');
-  });
-
-  mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission) => {
-    if (permission === 'usb') return true;
-    return true;
-  });
-
-  mainWindow.webContents.session.setDevicePermissionHandler((details) => {
-    if (details.deviceType === 'usb') return true;
-    return false;
-  });
-
   // Links externos abrem no navegador
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http')) shell.openExternal(url);
@@ -227,16 +210,15 @@ async function printSilentElectron(html, opts = {}) {
 <meta charset="utf-8">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'Courier New',monospace; font-size:12px; color:#000; background:#fff; width:${widthMm}mm; margin:0; padding:2mm; }
+  body { font-family:'Courier New',monospace; font-size:12px; color:#000; background:#fff; width:${widthPx}px; margin:0; padding:4px; }
   hr,.pt-hr { border:none; border-top:1px dashed #000; margin:4px 0; }
   .pt-center { text-align:center; }
   .pt-large { font-size:15px; font-weight:bold; }
   .print-ticket { padding:0; width:100%; }
-  @page { size:${widthMm}mm auto; margin:0; }
 </style>
 </head><body>${cleanHtml}</body></html>`;
 
-  // Salva HTML num arquivo temporário (data: URL causa tela branca)
+  // Salva HTML num arquivo temporário
   const tmpFile = path.join(os.tmpdir(), 'anotai-print-' + Date.now() + '.html');
   fs.writeFileSync(tmpFile, fullHtml, 'utf-8');
 
@@ -247,94 +229,71 @@ async function printSilentElectron(html, opts = {}) {
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
 
-  await printWin.loadFile(tmpFile);
-  await new Promise(r => setTimeout(r, 600));
-
-  const contentHeight = await printWin.webContents.executeJavaScript('document.body.scrollHeight');
-  log('🖨️ Conteúdo:', contentHeight + 'px | papel:', widthMm + 'mm | impressora:', printer || 'padrão');
-
-  // ── MÉTODO 1: Print direto via Electron (usa driver da impressora) ──
   try {
-    const result = await new Promise((resolve, reject) => {
-      const printOpts = {
-        silent: true,
-        printBackground: true,
-        copies: copies,
-        margins: { marginType: 'none' },
-      };
-      if (printer) printOpts.deviceName = printer;
+    await printWin.loadFile(tmpFile);
+    await new Promise(r => setTimeout(r, 800));
 
-      printWin.webContents.print(printOpts, (success, reason) => {
-        if (success) resolve({ ok: true });
-        else reject(new Error(reason || 'Falha'));
-      });
-    });
+    // Mede altura real do conteúdo
+    const contentHeight = await printWin.webContents.executeJavaScript(
+      'document.body.scrollHeight'
+    );
+    log('🖨️ Conteúdo:', contentHeight + 'px | papel:', widthMm + 'mm | impressora:', printer || 'padrão');
 
-    log('✅ Impresso via Electron silent print');
-    printWin.close();
-    try { fs.unlinkSync(tmpFile); } catch {}
-    return result;
+    // Gera PDF com tamanho exato do cupom (inches para Chromium)
+    const widthInches = widthMm / 25.4;
+    const heightInches = Math.max((contentHeight * 0.26458 + 10) / 25.4, 2);
 
-  } catch (e) {
-    log('⚠️ Print direto falhou:', e.message, '| Tentando via PDF...');
-  }
-
-  // ── MÉTODO 2: Gera PDF e imprime via SumatraPDF ou sistema ──
-  try {
-    const heightMm = Math.max((contentHeight * 0.26458) + 5, 50);
     const pdfBuffer = await printWin.webContents.printToPDF({
       printBackground: true,
-      pageSize: { width: widthMm / 25.4, height: heightMm / 25.4 },
+      preferCSSPageSize: false,
+      pageSize: { width: widthInches, height: heightInches },
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
     printWin.close();
 
-    const pdfFile = path.join(os.tmpdir(), 'anotai-print-' + Date.now() + '.pdf');
+    const pdfFile = path.join(os.tmpdir(), 'anotai-receipt-' + Date.now() + '.pdf');
     fs.writeFileSync(pdfFile, pdfBuffer);
+    log('📄 PDF gerado:', Math.round(pdfBuffer.length / 1024) + 'KB |', Math.round(widthInches * 25.4) + 'mm x', Math.round(heightInches * 25.4) + 'mm');
 
-    const sumatra = findSumatra();
-    let cmd;
-    if (sumatra) {
-      cmd = printer
-        ? `"${sumatra}" -print-to "${printer}" -silent "${pdfFile}"`
-        : `"${sumatra}" -print-to-default -silent "${pdfFile}"`;
-    } else {
-      cmd = `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb Print -WindowStyle Hidden"`;
+    // ── Imprime com pdf-to-printer (100% silencioso no Windows) ──
+    try {
+      const ptp = require('pdf-to-printer');
+      const printOpts = {};
+      if (printer) printOpts.printer = printer;
+
+      await ptp.print(pdfFile, printOpts);
+      log('✅ Impresso via pdf-to-printer' + (printer ? ' → ' + printer : ''));
+    } catch (ptpErr) {
+      log('⚠️ pdf-to-printer falhou:', ptpErr.message, '| Tentando fallback...');
+
+      // Fallback: PowerShell direto
+      const { exec } = require('child_process');
+      const cmd = printer
+        ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo -ArgumentList '${printer}' -WindowStyle Hidden"`
+        : `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb Print -WindowStyle Hidden"`;
+
+      await new Promise((resolve) => {
+        exec(cmd, { timeout: 15000 }, (err) => {
+          if (err) log('⚠️ PowerShell:', err.message);
+          resolve();
+        });
+      });
+      log('✅ Impresso via PowerShell fallback');
     }
 
-    log('🖨️ Comando:', cmd);
-    const { exec } = require('child_process');
-    await new Promise((resolve) => {
-      exec(cmd, { timeout: 15000 }, (err) => {
-        if (err) log('⚠️ Sistema:', err.message);
-        resolve();
-      });
-    });
-
+    // Limpa arquivos temporários
     try { fs.unlinkSync(tmpFile); } catch {}
     setTimeout(() => { try { fs.unlinkSync(pdfFile); } catch {} }, 5000);
-    log('✅ Impresso via PDF');
+
     return { ok: true };
 
-  } catch (e2) {
-    printWin.close();
+  } catch (e) {
+    try { printWin.close(); } catch {}
     try { fs.unlinkSync(tmpFile); } catch {}
-    log('❌ Ambos métodos falharam:', e2.message);
-    throw e2;
+    log('❌ Impressão falhou:', e.message);
+    throw e;
   }
-}
-
-function findSumatra() {
-  const paths = [
-    'C:\\Program Files\\SumatraPDF\\SumatraPDF.exe',
-    'C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe',
-    path.join(process.env.LOCALAPPDATA || '', 'SumatraPDF', 'SumatraPDF.exe'),
-  ];
-  for (const p of paths) {
-    try { if (fs.existsSync(p)) return p; } catch {}
-  }
-  return null;
 }
 
 // ── Impressão ESC/POS via USB ───────────────────────────────
@@ -793,9 +752,6 @@ function setupAutoStart() {
 
 // ── App lifecycle ───────────────────────────────────────────
 app.whenReady().then(() => {
-  // Habilita WebUSB (necessário para parear impressora USB)
-  app.commandLine.appendSwitch('enable-experimental-web-platform-features');
-
   setupIPC();
   createWindow();
   createTray();
