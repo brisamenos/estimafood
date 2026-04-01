@@ -11,7 +11,7 @@ const Store = require('electron-store');
 // ── Config persistente ──────────────────────────────────────
 const store = new Store({
   defaults: {
-    serverUrl: '',
+    serverUrl: 'https://estimafood.evocrm.sbs/gestor.html',
     printer: '',
     paperWidth: 80,
     fontSize: 12,
@@ -199,12 +199,13 @@ async function printSilentElectron(html, opts = {}) {
   const printer = opts.printer || store.get('printer') || '';
   const paperWidth = opts.paperWidth || store.get('paperWidth') || 80;
   const copies = opts.copies || store.get('printCopies') || 1;
+  const widthPx = paperWidth === 58 ? 220 : 302;
 
   // Cria uma janela oculta para renderizar o HTML
   const printWin = new BrowserWindow({
     show: false,
-    width: paperWidth === 58 ? 220 : 302,
-    height: 900,
+    width: widthPx,
+    height: 2000,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
 
@@ -212,19 +213,30 @@ async function printSilentElectron(html, opts = {}) {
 <meta charset="utf-8">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'Courier New',monospace; font-size:12px; color:#000; background:#fff; width:${paperWidth}mm; }
+  body { font-family:'Courier New',monospace; font-size:12px; color:#000; background:#fff; width:${widthPx}px; }
   hr,.pt-hr { border:none; border-top:1px dashed #000; margin:4px 0; }
   .pt-center { text-align:center; }
   .pt-large { font-size:15px; font-weight:bold; }
-  .print-ticket { padding:2mm; width:100%; }
-  @media print { @page { margin:0; size:${paperWidth}mm auto; } body { margin:0; } }
+  .print-ticket { padding:4px; width:100%; }
+  @media print { @page { margin:0; } body { margin:0; } }
 </style>
 </head><body>${html}</body></html>`;
 
   await printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(fullHtml)}`);
 
   // Espera renderizar
-  await new Promise(r => setTimeout(r, 300));
+  await new Promise(r => setTimeout(r, 500));
+
+  // Mede a altura real do conteúdo
+  const contentHeight = await printWin.webContents.executeJavaScript(
+    'Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 100)'
+  );
+
+  // Converte px para microns (1px = ~265 microns a 96dpi) e adiciona margem
+  const widthMicrons = paperWidth * 1000;
+  const heightMicrons = Math.ceil(contentHeight * 265) + 3000;
+
+  log('🖨️ Página:', paperWidth + 'mm x', Math.round(heightMicrons/1000) + 'mm', '| conteúdo:', contentHeight + 'px');
 
   return new Promise((resolve, reject) => {
     const printOpts = {
@@ -232,7 +244,7 @@ async function printSilentElectron(html, opts = {}) {
       printBackground: true,
       copies: copies,
       margins: { marginType: 'none' },
-      pageSize: { width: paperWidth * 1000, height: 297000 }, // microns
+      pageSize: { width: widthMicrons, height: heightMicrons },
     };
 
     if (printer) printOpts.deviceName = printer;
