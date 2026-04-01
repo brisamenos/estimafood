@@ -1,7 +1,7 @@
 {
-  "name": "anotai-print",
-  "version": "1.0.1",
-  "description": "Anotaí — Impressão Automática para Restaurantes",
+  "name": "estimafood",
+  "version": "1.0.4",
+  "description": "estimafood — Impressão Automática para Restaurantes",
   "main": "src/main.js",
   "author": "Anotaí",
   "license": "MIT",
@@ -31,8 +31,8 @@
   },
   "build": {
     "appId": "com.anotai.print",
-    "productName": "Anotaí Print",
-    "artifactName": "AnotaiPrint-${version}-${os}-${arch}.${ext}",
+    "productName": "EstimaFood Print",
+    "artifactName": "EstimaFood-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -62,7 +62,7 @@
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Anotaí Print",
+      "shortcutName": "EstimaFood Print",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerSidebar": null,
