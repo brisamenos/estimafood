@@ -1,6 +1,6 @@
 {
   "name": "anotai-print",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Anotaí — Impressão Automática para Restaurantes",
   "main": "src/main.js",
   "author": "Anotaí",
@@ -9,7 +9,7 @@
     "start": "electron .",
     "dev": "cross-env NODE_ENV=development electron .",
     "build": "electron-builder",
-    "build:win": "electron-builder --win",
+    "build:win": "electron-builder --win --publish never",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
     "postinstall": "electron-builder install-app-deps"
