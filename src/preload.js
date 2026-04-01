@@ -34,6 +34,11 @@ contextBridge.exposeInMainWorld('ElectronPrint', {
 
   openDevTools: () => ipcRenderer.invoke('app:devtools'),
 
+  // ── Sessão persistente ─────────────────────────────────
+  saveSession: (data) => ipcRenderer.invoke('session:save', data),
+  loadSession: ()     => ipcRenderer.invoke('session:load'),
+  clearSession: ()    => ipcRenderer.invoke('session:clear'),
+
   // ── Identifica que estamos no Electron ─────────────────
   isElectron: true,
   platform: process.platform,
