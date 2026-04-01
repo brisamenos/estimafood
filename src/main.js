@@ -205,17 +205,36 @@ async function printSilentElectron(html, opts = {}) {
 
   const cleanHtml = html.includes('<html') ? html.replace(/.*<body[^>]*>/is,'').replace(/<\/body>.*/is,'') : html;
 
-  // PASSO 1: Renderiza numa janela pra medir a altura
-  const measureHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'Courier New',monospace; font-size:12px; color:#000; background:#fff; width:${widthMm}mm; padding:2mm; }
-  hr,.pt-hr { border:none; border-top:1px dashed #000; margin:4px 0; }
-  .pt-center { text-align:center; } .pt-large { font-size:15px; font-weight:bold; }
-  .print-ticket { padding:0; width:100%; }
-</style></head><body>${cleanHtml}</body></html>`;
+  // PASSO 1: Limpa o HTML — remove cores inline do tema escuro
+  let safeHtml = cleanHtml
+    .replace(/color\s*:\s*[^;"']+/gi, 'color:#000')
+    .replace(/background\s*:\s*[^;"']+/gi, 'background:#fff')
+    .replace(/background-color\s*:\s*[^;"']+/gi, 'background-color:#fff')
+    .replace(/var\(--[^)]+\)/gi, '#000')
+    .replace(/style="[^"]*"/gi, (match) => {
+      // Mantém estilos de layout mas força cores
+      return match
+        .replace(/color\s*:\s*[^;"]+/gi, 'color:#000')
+        .replace(/background\s*:\s*[^;"]+/gi, 'background:#fff');
+    });
 
-  const measureFile = path.join(os.tmpdir(), 'anotai-measure-' + Date.now() + '.html');
+  // CSS agressivo que sobrescreve TUDO
+  const resetCSS = `
+    @page { size: WIDTHPLACEHOLDER HEIGHTPLACEHOLDER; margin: 0; }
+    *, *::before, *::after { color: #000 !important; background: #fff !important; background-color: #fff !important; -webkit-print-color-adjust: exact !important; }
+    body { font-family: 'Courier New', monospace; font-size: 12px; width: WIDTHPLACEHOLDER; margin: 0; padding: 2mm; }
+    hr, .pt-hr { border: none !important; border-top: 1px dashed #000 !important; margin: 4px 0; background: transparent !important; }
+    .pt-center { text-align: center; }
+    .pt-large { font-size: 15px; font-weight: bold; }
+    .print-ticket { padding: 0; width: 100%; }
+  `;
+
+  // Renderiza pra medir a altura
+  const measureHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>${resetCSS.replace(/WIDTHPLACEHOLDER/g, widthMm+'mm').replace(/HEIGHTPLACEHOLDER/g, 'auto')}</style>
+</head><body>${safeHtml}</body></html>`;
+
+  const measureFile = path.join(os.tmpdir(), 'ef-measure-' + Date.now() + '.html');
   fs.writeFileSync(measureFile, measureHtml, 'utf-8');
 
   const measureWin = new BrowserWindow({
@@ -233,19 +252,12 @@ async function printSilentElectron(html, opts = {}) {
 
   log('🖨️ Medido:', contentHeight + 'px →', heightMm + 'mm | largura:', widthMm + 'mm');
 
-  // PASSO 2: Gera HTML com @page size exato (CSS controla o PDF)
+  // PASSO 2: Gera HTML com @page size exato
   const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>
-  @page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'Courier New',monospace; font-size:12px; color:#000 !important; background:#fff !important; width:${widthMm}mm; padding:2mm; -webkit-print-color-adjust:exact; }
-  hr,.pt-hr { border:none; border-top:1px dashed #000; margin:4px 0; }
-  .pt-center { text-align:center; } .pt-large { font-size:15px; font-weight:bold; }
-  .print-ticket { padding:0; width:100%; }
-  div,span,b,strong { color:#000 !important; }
-</style></head><body>${cleanHtml}</body></html>`;
+<style>${resetCSS.replace(/WIDTHPLACEHOLDER/g, widthMm+'mm').replace(/HEIGHTPLACEHOLDER/g, heightMm+'mm')}</style>
+</head><body>${safeHtml}</body></html>`;
 
-  const printFile = path.join(os.tmpdir(), 'anotai-print-' + Date.now() + '.html');
+  const printFile = path.join(os.tmpdir(), 'ef-print-' + Date.now() + '.html');
   fs.writeFileSync(printFile, printHtml, 'utf-8');
 
   const printWin = new BrowserWindow({
@@ -266,9 +278,19 @@ async function printSilentElectron(html, opts = {}) {
 
     printWin.close();
 
-    const pdfFile = path.join(os.tmpdir(), 'anotai-receipt-' + Date.now() + '.pdf');
+    const pdfFile = path.join(os.tmpdir(), 'ef-receipt-' + Date.now() + '.pdf');
     fs.writeFileSync(pdfFile, pdfBuffer);
     log('📄 PDF:', Math.round(pdfBuffer.length / 1024) + 'KB | tamanho:', widthMm + 'x' + heightMm + 'mm');
+
+    // DEBUG: salva cópia na Área de Trabalho pra verificar visualmente
+    try {
+      const desktop = path.join(os.homedir(), 'Desktop');
+      const debugPdf = path.join(desktop, 'EstimaFood-DEBUG.pdf');
+      const debugHtml = path.join(desktop, 'EstimaFood-DEBUG.html');
+      fs.writeFileSync(debugPdf, pdfBuffer);
+      fs.writeFileSync(debugHtml, printHtml, 'utf-8');
+      log('🔍 DEBUG: PDF e HTML salvos na Área de Trabalho');
+    } catch (dbgErr) { log('⚠️ Debug save:', dbgErr.message); }
 
     // PASSO 4: Imprime o PDF silenciosamente
     try {
