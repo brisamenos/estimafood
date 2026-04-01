@@ -1,6 +1,6 @@
 {
   "name": "estimafood",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "estimafood — Impressão Automática para Restaurantes",
   "main": "src/main.js",
   "author": "Anotaí",
