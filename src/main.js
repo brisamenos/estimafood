@@ -246,7 +246,8 @@ async function printSilentElectron(html, opts = {}) {
   await new Promise(r => setTimeout(r, 600));
 
   const contentHeight = await measureWin.webContents.executeJavaScript('document.body.scrollHeight');
-  const heightMm = Math.ceil(contentHeight * 0.265) + 15; // px to mm + margem
+  // Garante retrato: altura sempre maior que a largura do papel (evita impressão em paisagem)
+  const heightMm = Math.max(Math.ceil(contentHeight * 0.265) + 15, widthMm + 20);
   measureWin.close();
   try { fs.unlinkSync(measureFile); } catch {}
 
