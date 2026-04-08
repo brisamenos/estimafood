@@ -221,11 +221,27 @@ async function printSilentElectron(html, opts = {}) {
   // CSS agressivo que sobrescreve TUDO
   const resetCSS = `
     @page { size: WIDTHPLACEHOLDER HEIGHTPLACEHOLDER; margin: 0; }
-    *, *::before, *::after { color: #000 !important; background: #fff !important; background-color: #fff !important; -webkit-print-color-adjust: exact !important; }
-    body { font-family: 'Courier New', monospace; font-size: 12px; width: WIDTHPLACEHOLDER; margin: 0; padding: 2mm; }
-    hr, .pt-hr { border: none !important; border-top: 1px dashed #000 !important; margin: 4px 0; background: transparent !important; }
+    *, *::before, *::after {
+      color: #000 !important;
+      background: #fff !important;
+      background-color: #fff !important;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+      color-adjust: exact !important;
+      -webkit-font-smoothing: none !important;
+    }
+    body {
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+      font-weight: bold;
+      width: WIDTHPLACEHOLDER;
+      margin: 0;
+      padding: 2mm;
+      color: #000 !important;
+    }
+    hr, .pt-hr { border: none !important; border-top: 2px solid #000 !important; margin: 4px 0; background: transparent !important; }
     .pt-center { text-align: center; }
-    .pt-large { font-size: 15px; font-weight: bold; }
+    .pt-large { font-size: 17px; font-weight: bold; }
     .print-ticket { padding: 0; width: 100%; }
   `;
 
@@ -237,8 +253,10 @@ async function printSilentElectron(html, opts = {}) {
   const measureFile = path.join(os.tmpdir(), 'ef-measure-' + Date.now() + '.html');
   fs.writeFileSync(measureFile, measureHtml, 'utf-8');
 
+  // Janela de medição com largura proporcional ao papel (96 DPI) para scrollHeight preciso
+  const measureWinWidth = Math.round(widthMm / 25.4 * 96) + 20;
   const measureWin = new BrowserWindow({
-    show: false, width: 800, height: 2000,
+    show: false, width: measureWinWidth, height: 4000,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
 
@@ -297,11 +315,11 @@ async function printSilentElectron(html, opts = {}) {
     try {
       const ptp = require('pdf-to-printer');
       const printOpts = {
-        scale: 'noscale',  // NÃO redimensionar — envia no tamanho real
+        scale: 'fit',  // fit = preenche o papel na DPI nativa da impressora térmica (mais escuro)
       };
       if (printer) printOpts.printer = printer;
       await ptp.print(pdfFile, printOpts);
-      log('✅ Impresso via pdf-to-printer (noscale)' + (printer ? ' → ' + printer : ''));
+      log('✅ Impresso via pdf-to-printer (fit)' + (printer ? ' → ' + printer : '')); //' + (printer ? ' → ' + printer : ''));
     } catch (ptpErr) {
       log('⚠️ pdf-to-printer falhou:', ptpErr.message, '| Tentando SumatraPDF direto...');
 
@@ -337,8 +355,8 @@ async function printSilentElectron(html, opts = {}) {
 
       if (sumatraPath) {
         const cmd = printer
-          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "noscale" -silent "${pdfFile}"`
-          : `"${sumatraPath}" -print-to-default -print-settings "noscale" -silent "${pdfFile}"`;
+          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "fit" -silent "${pdfFile}"`
+          : `"${sumatraPath}" -print-to-default -print-settings "fit" -silent "${pdfFile}"`;
         log('🖨️ SumatraPDF:', cmd);
         await new Promise((resolve) => {
           exec(cmd, { timeout: 15000 }, () => resolve());
