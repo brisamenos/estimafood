@@ -1,48 +1,70 @@
 /**
- * Preload — expõe window.ElectronPrint para o frontend web
- *
- * API compatível com o que o gestor.html já espera:
- *   window.ElectronPrint.getPrintConfig()     → { printers, printer }
- *   window.ElectronPrint.savePrintConfig(cfg) → { ok }
- *   window.ElectronPrint.printOrder(order)    → { ok }
- *   window.ElectronPrint.notify(title, body)  → void
+ * ╔══════════════════════════════════════════════════════════╗
+ * ║  ESTIMAFOOD PRINT — Preload Script                      ║
+ * ║  Expõe APIs seguras do Electron para o renderer         ║
+ * ╚══════════════════════════════════════════════════════════╝
  */
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('ElectronPrint', {
 
-  // ── Impressão ─────────────────────────────────────────
-  getPrintConfig: () => ipcRenderer.invoke('print:getConfig'),
+  /**
+   * Retorna a lista de nomes das impressoras instaladas no sistema.
+   * Usado pelo garcom.html para popular o <select> de impressora.
+   * @returns {Promise<string[]>}
+   */
+  getPrinters: async () => {
+    const cfg = await ipcRenderer.invoke('print:getConfig');
+    return cfg.printers || [];
+  },
 
-  savePrintConfig: (cfg) => ipcRenderer.invoke('print:saveConfig', cfg),
+  /**
+   * Retorna a configuração completa de impressão (impressora salva,
+   * largura de papel, cópias, etc).
+   * @returns {Promise<object>}
+   */
+  getConfig: () => ipcRenderer.invoke('print:getConfig'),
 
+  /**
+   * Salva configurações de impressão no electron-store.
+   * @param {object} cfg - Campos a salvar (printer, paperWidth, etc)
+   */
+  saveConfig: (cfg) => ipcRenderer.invoke('print:saveConfig', cfg),
+
+  /**
+   * Imprime um pedido estruturado via ESC/POS raw (ou PDF como fallback).
+   * A impressora usada é a que estiver salva no electron-store.
+   * @param {object} order - Dados do pedido
+   */
   printOrder: (order) => ipcRenderer.invoke('print:order', order),
 
-  printHtml: (html, opts) => ipcRenderer.invoke('print:html', html, opts),
+  /**
+   * Imprime HTML bruto silenciosamente.
+   * Aceita `opts.printer` para escolher a impressora na hora.
+   * @param {string} html
+   * @param {{ printer?: string, paperWidth?: number, landscape?: boolean, scaleFactor?: number }} opts
+   */
+  printHtml: (html, opts) => ipcRenderer.invoke('print:html', html, opts || {}),
 
-  // ── Notificação nativa do OS ──────────────────────────
+  /**
+   * Exibe uma notificação nativa do sistema operacional.
+   * @param {string} title
+   * @param {string} body
+   */
   notify: (title, body) => ipcRenderer.invoke('app:notify', title, body),
 
-  // ── App ────────────────────────────────────────────────
-  setServerUrl: (url) => ipcRenderer.invoke('app:setServerUrl', url),
+  /** Retorna a versão do app. @returns {Promise<string>} */
+  version: () => ipcRenderer.invoke('app:version'),
 
-  getServerUrl: () => ipcRenderer.invoke('app:getServerUrl'),
-
+  /** Recarrega o app. */
   restart: () => ipcRenderer.invoke('app:restart'),
 
-  getVersion: () => ipcRenderer.invoke('app:version'),
+  /** Salva a URL do servidor e navega até ela. */
+  setServerUrl: (url) => ipcRenderer.invoke('app:setServerUrl', url),
 
-  openDevTools: () => ipcRenderer.invoke('app:devtools'),
+  /** Retorna a URL do servidor salva. @returns {Promise<string>} */
+  getServerUrl: () => ipcRenderer.invoke('app:getServerUrl'),
 
-  // ── Sessão persistente ─────────────────────────────────
-  saveSession: (data) => ipcRenderer.invoke('session:save', data),
-  loadSession: ()     => ipcRenderer.invoke('session:load'),
-  clearSession: ()    => ipcRenderer.invoke('session:clear'),
-
-  // ── Identifica que estamos no Electron ─────────────────
-  isElectron: true,
-  platform: process.platform,
+  /** Abre/fecha o DevTools (apenas em desenvolvimento). */
+  devtools: () => ipcRenderer.invoke('app:devtools'),
 });
-
-// Marca global para detecção rápida
-contextBridge.exposeInMainWorld('__ELECTRON__', true);
