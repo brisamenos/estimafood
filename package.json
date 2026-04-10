@@ -9,7 +9,7 @@
     "start": "electron .",
     "dev": "cross-env NODE_ENV=development electron .",
     "build": "electron-builder",
-    "build:win": "electron-builder --win --publish never",
+    "build:win": "electron-builder --win --publish always",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
     "postinstall": "electron-builder install-app-deps"
