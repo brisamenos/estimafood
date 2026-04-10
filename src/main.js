@@ -90,6 +90,8 @@ function createWindow() {
   // Show when ready
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.focus(); // Garante foco no webContents (fix: teclado travado)
     if (isDev) mainWindow.webContents.openDevTools();
   });
 
@@ -97,6 +99,25 @@ function createWindow() {
   mainWindow.on('resize', () => {
     const [w, h] = mainWindow.getSize();
     store.set('windowBounds', { width: w, height: h });
+  });
+
+  // Fix: ao restaurar da bandeja, força foco no webContents pra evitar teclado travado
+  mainWindow.on('show', () => {
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.focus();
+        mainWindow.webContents.focus();
+      }
+    }, 100);
+  });
+
+  mainWindow.on('restore', () => {
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.focus();
+        mainWindow.webContents.focus();
+      }
+    }, 100);
   });
 
   // Minimizar para tray em vez de fechar
@@ -137,7 +158,7 @@ function createTray() {
     {
       label: '📋 Abrir EstimaFood',
       click: () => {
-        if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+        if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.focus(); }
         else createWindow();
       }
     },
@@ -1000,43 +1021,197 @@ function setupIPC() {
 }
 
 // ── Auto-updater ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// PRINT QUEUE POLLING — Busca jobs do servidor e imprime
+// Funciona automaticamente quando o gestor está aberto no app
+// ══════════════════════════════════════════════════════════════
+const pqHttp = require('http');
+const pqHttps = require('https');
+
+let _pqTimer = null;
+let _pqHbTimer = null;
+let _pqActive = false;
+let _pqJobCount = 0;
+
+function _pqRequest(method, baseUrl, urlPath, tenantId, body) {
+  return new Promise((resolve, reject) => {
+    const full = baseUrl.replace(/\/$/, '') + urlPath;
+    const u = new URL(full);
+    const lib = u.protocol === 'https:' ? pqHttps : pqHttp;
+    const payload = body ? JSON.stringify(body) : null;
+    const opts = {
+      hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search, method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(tenantId ? { 'x-tenant-id': tenantId } : {}),
+        ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+      },
+    };
+    const req = lib.request(opts, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Timeout')); });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function _pqGetBaseUrl() {
+  // Extrai a URL base do servidor a partir da URL do gestor
+  // Ex: "https://estimafood.evocrm.sbs/gestor.html" → "https://estimafood.evocrm.sbs"
+  const serverUrl = store.get('serverUrl') || '';
+  if (!serverUrl) return '';
+  try {
+    const u = new URL(serverUrl);
+    return u.origin; // "https://estimafood.evocrm.sbs"
+  } catch { return ''; }
+}
+
+function _pqGetTenantId() {
+  // Tenta extrair tenant_id da sessão do gestor via webContents
+  // Fallback: usa o que foi salvo no store
+  return store.get('_pqTenantId') || '';
+}
+
+function startPrintQueuePolling() {
+  if (_pqActive) return;
+  const baseUrl = _pqGetBaseUrl();
+  if (!baseUrl) { log('[PQ] Sem URL base, polling não iniciado'); return; }
+
+  _pqActive = true;
+  log('[PQ] ✅ Polling iniciado |', baseUrl);
+
+  // Heartbeat a cada 15s
+  const hb = () => {
+    const tid = _pqGetTenantId();
+    if (!tid) return;
+    _pqRequest('POST', baseUrl, '/api/print-queue/heartbeat', tid, { printer: 'EstimaFoodPrint' }).catch(() => {});
+  };
+  hb();
+  _pqHbTimer = setInterval(hb, 15000);
+
+  // Polling a cada 4s
+  const poll = async () => {
+    if (!_pqActive) return;
+    const tid = _pqGetTenantId();
+    if (tid) {
+      try {
+        const res = await _pqRequest('GET', baseUrl, '/api/print-queue/pending', tid);
+        if (Array.isArray(res.body) && res.body.length) {
+          log(`[PQ] 📋 ${res.body.length} job(s) pendente(s)`);
+          for (const job of res.body) {
+            try {
+              await _pqPrintJob(job);
+              await _pqRequest('PATCH', baseUrl, `/api/print-queue/job/${job.id}/done`, tid, { status: 'done' });
+              _pqJobCount++;
+              log(`[PQ] ✅ Job #${job.id} impresso! (${job.tipo || 'geral'})`);
+            } catch (e) {
+              log(`[PQ] ❌ Job #${job.id} falhou:`, e.message);
+              try { await _pqRequest('PATCH', baseUrl, `/api/print-queue/job/${job.id}/done`, tid, { status: 'error', error: e.message }); } catch {}
+            }
+          }
+        }
+      } catch (e) {
+        // Silencioso — servidor offline ou sem conexão
+      }
+    }
+    _pqTimer = setTimeout(poll, 4000);
+  };
+  poll();
+}
+
+function stopPrintQueuePolling() {
+  _pqActive = false;
+  if (_pqTimer) { clearTimeout(_pqTimer); _pqTimer = null; }
+  if (_pqHbTimer) { clearInterval(_pqHbTimer); _pqHbTimer = null; }
+  log('[PQ] ⏸️ Polling parado');
+}
+
+async function _pqPrintJob(job) {
+  // Usa o printSilentElectron que já existe no app
+  const opts = {
+    printer: job.printer || store.get('printer') || '',
+    paperWidth: parseInt(job.format) || store.get('paperWidth') || 80,
+  };
+  return await printSilentElectron(job.html, opts);
+}
+
+// ── IPC para o gestor informar o tenant_id ──────────────────
+// O gestor.html chama ElectronPrint.setTenantId(tid) ao fazer login
+// Isso permite o polling saber qual tenant buscar
+ipcMain.handle('print:setTenantId', (_e, tid) => {
+  if (tid && tid !== store.get('_pqTenantId')) {
+    store.set('_pqTenantId', tid);
+    log('[PQ] Tenant definido:', tid);
+    // Inicia polling se ainda não está rodando
+    if (!_pqActive) startPrintQueuePolling();
+  }
+  return { ok: true };
+});
+
 function setupUpdater() {
   try {
     const { autoUpdater } = require('electron-updater');
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.allowDowngrade = false;
+
+    autoUpdater.on('checking-for-update', () => {
+      log('🔍 Verificando atualizações...');
+    });
 
     autoUpdater.on('update-available', (info) => {
       log('📦 Atualização disponível:', info.version);
       if (Notification.isSupported()) {
         new Notification({
-          title: 'EstimaFood Print — Atualização',
-          body: `Versão ${info.version} disponível. Baixando...`,
+          title: 'EstimaFood Print',
+          body: `Baixando versão ${info.version}...`,
           icon: getIcon(),
         }).show();
       }
     });
 
+    autoUpdater.on('update-not-available', () => {
+      log('✅ App está atualizado');
+    });
+
+    autoUpdater.on('download-progress', (progress) => {
+      log(`⬇️ Baixando: ${Math.round(progress.percent)}%`);
+    });
+
     autoUpdater.on('update-downloaded', (info) => {
-      log('✅ Atualização baixada:', info.version);
+      log('✅ Atualização baixada:', info.version, '— instalando em 10s...');
       if (Notification.isSupported()) {
         new Notification({
-          title: 'EstimaFood Print — Pronta!',
-          body: 'A atualização será instalada ao reiniciar.',
+          title: 'EstimaFood Print',
+          body: `Versão ${info.version} pronta! Reiniciando em 10 segundos...`,
           icon: getIcon(),
         }).show();
       }
+      // Instala automaticamente após 10 segundos
+      setTimeout(() => {
+        isQuitting = true;
+        autoUpdater.quitAndInstall(false, true);
+      }, 10000);
     });
 
     autoUpdater.on('error', (err) => {
       log('⚠️ Updater erro:', err.message);
     });
 
-    // Verifica a cada 4 horas
+    // Verifica ao iniciar
     autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    // Verifica a cada 30 minutos (em vez de 4h)
     setInterval(() => {
       autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-    }, 4 * 60 * 60 * 1000);
+    }, 30 * 60 * 1000);
   } catch (e) {
     log('⚠️ Auto-updater não disponível:', e.message);
   }
@@ -1062,13 +1237,14 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   setupAutoStart();
+  startPrintQueuePolling(); // Inicia polling do print-queue
 
   // Auto-updater só em produção
   if (!isDev) setupUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    else if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    else if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.focus(); }
   });
 
   log('✅ EstimaFood Print iniciado | versão:', app.getVersion());
@@ -1092,6 +1268,7 @@ if (!gotLock) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
       mainWindow.focus();
+      mainWindow.webContents.focus();
     }
   });
 }

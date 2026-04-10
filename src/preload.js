@@ -67,4 +67,11 @@ contextBridge.exposeInMainWorld('ElectronPrint', {
 
   /** Abre/fecha o DevTools (apenas em desenvolvimento). */
   devtools: () => ipcRenderer.invoke('app:devtools'),
+
+  /**
+   * Informa o tenant_id ao serviço de impressão.
+   * Chamado automaticamente pelo gestor.html ao fazer login.
+   * @param {string} tenantId
+   */
+  setTenantId: (tenantId) => ipcRenderer.invoke('print:setTenantId', tenantId),
 });
