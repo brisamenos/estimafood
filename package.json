@@ -1,6 +1,6 @@
 {
   "name": "estimafood-print",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "description": "EstimaFood — Impressão Automática para Restaurantes",
   "main": "src/main.js",
   "author": "EstimaFood",
@@ -12,7 +12,7 @@
     "build:win": "electron-builder --win --publish always",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps || true"
   },
   "dependencies": {
     "electron-store": "^8.2.0",
@@ -47,7 +47,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico",
@@ -66,12 +68,17 @@
       "runAfterFinish": true
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "assets/icon.png",
       "category": "public.app-category.business"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "assets/icon.png",
       "category": "Office"
     },
