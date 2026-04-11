@@ -138,10 +138,28 @@ function createWindow() {
   });
 
   // Inject CSS para esconder elementos web desnecessários no desktop
-  mainWindow.webContents.on('did-finish-load', () => {
+  mainWindow.webContents.on('did-finish-load', async () => {
     mainWindow.webContents.insertCSS(`
       .pwa-install-banner, .update-toast { display: none !important; }
     `).catch(() => {});
+
+    // Auto-login: injeta sessão salva no sessionStorage
+    const savedSession = store.get('_savedSession');
+    if (savedSession) {
+      const ts = savedSession.ts || 0;
+      const age = Date.now() - ts;
+      // Sessão válida por 30 dias no Electron (no web é 8h)
+      if (age < 30 * 24 * 60 * 60 * 1000) {
+        const sessionJson = JSON.stringify(savedSession).replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+        await mainWindow.webContents.executeJavaScript(
+          `sessionStorage.setItem('sys_session', \`${sessionJson}\`)`
+        ).catch(() => {});
+        log('[SESSION] ✅ Sessão restaurada automaticamente:', savedSession.nome || savedSession.email || '?');
+      } else {
+        store.delete('_savedSession');
+        log('[SESSION] Sessão expirada — removida');
+      }
+    }
   });
 }
 
@@ -1001,6 +1019,40 @@ function setupIPC() {
 
   ipcMain.handle('app:getServerUrl', async () => {
     return store.get('serverUrl') || '';
+  });
+
+  // ── Sessão persistente — auto-login no Electron ──────────────
+  ipcMain.handle('app:saveSession', (_e, session) => {
+    store.set('_savedSession', session);
+    log('[SESSION] Sessão salva para auto-login');
+    return { ok: true };
+  });
+
+  ipcMain.handle('app:getSession', () => {
+    return store.get('_savedSession') || null;
+  });
+
+  ipcMain.handle('app:clearSession', () => {
+    store.delete('_savedSession');
+    log('[SESSION] Sessão removida');
+    return { ok: true };
+  });
+
+  // ── Sessão persistente — auto-login no Electron ─────────────
+  ipcMain.handle('app:saveSession', (_e, session) => {
+    store.set('_savedSession', session);
+    log('[SESSION] Sessão salva para auto-login:', session.nome || session.email || '?');
+    return { ok: true };
+  });
+
+  ipcMain.handle('app:getSession', () => {
+    return store.get('_savedSession') || null;
+  });
+
+  ipcMain.handle('app:clearSession', () => {
+    store.delete('_savedSession');
+    log('[SESSION] Sessão removida (logout)');
+    return { ok: true };
   });
 
   // Reiniciar app
