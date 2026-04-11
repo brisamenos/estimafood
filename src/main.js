@@ -138,26 +138,23 @@ function createWindow() {
   });
 
   // Inject CSS para esconder elementos web desnecessários no desktop
-  mainWindow.webContents.on('did-finish-load', async () => {
+  mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.insertCSS(`
       .pwa-install-banner, .update-toast { display: none !important; }
     `).catch(() => {});
 
-    // Auto-login: injeta sessão salva no sessionStorage
+    // Auto-login seguro — sem async, sem template literal
     const savedSession = store.get('_savedSession');
     if (savedSession) {
-      const ts = savedSession.ts || 0;
-      const age = Date.now() - ts;
-      // Sessão válida por 30 dias no Electron (no web é 8h)
+      const age = Date.now() - (savedSession.ts || 0);
       if (age < 30 * 24 * 60 * 60 * 1000) {
-        const sessionJson = JSON.stringify(savedSession).replace(/\\/g, '\\\\').replace(/`/g, '\\`');
-        await mainWindow.webContents.executeJavaScript(
-          `sessionStorage.setItem('sys_session', \`${sessionJson}\`)`
+        const sessionStr = JSON.stringify(savedSession);
+        mainWindow.webContents.executeJavaScript(
+          'try{sessionStorage.setItem("sys_session",' + JSON.stringify(sessionStr) + ')}catch(e){}'
         ).catch(() => {});
-        log('[SESSION] ✅ Sessão restaurada automaticamente:', savedSession.nome || savedSession.email || '?');
+        log('[SESSION] Sessão restaurada:', savedSession.nome || '?');
       } else {
         store.delete('_savedSession');
-        log('[SESSION] Sessão expirada — removida');
       }
     }
   });
@@ -1021,39 +1018,13 @@ function setupIPC() {
     return store.get('serverUrl') || '';
   });
 
-  // ── Sessão persistente — auto-login no Electron ──────────────
+  // Sessão persistente
   ipcMain.handle('app:saveSession', (_e, session) => {
     store.set('_savedSession', session);
-    log('[SESSION] Sessão salva para auto-login');
     return { ok: true };
   });
-
-  ipcMain.handle('app:getSession', () => {
-    return store.get('_savedSession') || null;
-  });
-
-  ipcMain.handle('app:clearSession', () => {
-    store.delete('_savedSession');
-    log('[SESSION] Sessão removida');
-    return { ok: true };
-  });
-
-  // ── Sessão persistente — auto-login no Electron ─────────────
-  ipcMain.handle('app:saveSession', (_e, session) => {
-    store.set('_savedSession', session);
-    log('[SESSION] Sessão salva para auto-login:', session.nome || session.email || '?');
-    return { ok: true };
-  });
-
-  ipcMain.handle('app:getSession', () => {
-    return store.get('_savedSession') || null;
-  });
-
-  ipcMain.handle('app:clearSession', () => {
-    store.delete('_savedSession');
-    log('[SESSION] Sessão removida (logout)');
-    return { ok: true };
-  });
+  ipcMain.handle('app:getSession', () => store.get('_savedSession') || null);
+  ipcMain.handle('app:clearSession', () => { store.delete('_savedSession'); return { ok: true }; });
 
   // Reiniciar app
   ipcMain.handle('app:restart', async () => {
