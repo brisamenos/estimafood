@@ -74,22 +74,7 @@ contextBridge.exposeInMainWorld('ElectronPrint', {
    * @param {string} tenantId
    */
   setTenantId: (tenantId) => ipcRenderer.invoke('print:setTenantId', tenantId),
-
-  /**
-   * Salva a sessão do gestor no electron-store para auto-login.
-   * Chamado após login bem-sucedido no gestor.html.
-   * @param {object} session - Objeto sys_session completo
-   */
-  saveSession: (session) => ipcRenderer.invoke('app:saveSession', session),
-
-  /**
-   * Retorna a sessão salva (ou null se não houver).
-   * @returns {Promise<object|null>}
-   */
-  getSession: () => ipcRenderer.invoke('app:getSession'),
-
-  /**
-   * Remove a sessão salva (logout).
-   */
-  clearSession: () => ipcRenderer.invoke('app:clearSession'),
+  saveSession:  (session) => ipcRenderer.invoke('app:saveSession', session),
+  getSession:   ()        => ipcRenderer.invoke('app:getSession'),
+  clearSession: ()        => ipcRenderer.invoke('app:clearSession'),
 });
