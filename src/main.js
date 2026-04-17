@@ -261,45 +261,31 @@ function getSysPrinters() {
 async function printSilentElectron(html, opts = {}) {
   const printer = opts.printer || store.get('printer') || '';
   const paperWidth = opts.paperWidth || store.get('paperWidth') || 80;
-  const copies = opts.copies || store.get('printCopies') || 1;
   const widthMm = paperWidth === 58 ? 58 : 80;
 
   const cleanHtml = html.includes('<html') ? html.replace(/.*<body[^>]*>/is,'').replace(/<\/body>.*/is,'') : html;
 
-  // PASSO 1: Limpa o HTML — remove cores inline do tema escuro
+  // Limpa cores do tema escuro
   let safeHtml = cleanHtml
     .replace(/color\s*:\s*[^;"']+/gi, 'color:#000')
     .replace(/background\s*:\s*[^;"']+/gi, 'background:#fff')
     .replace(/background-color\s*:\s*[^;"']+/gi, 'background-color:#fff')
-    .replace(/var\(--[^)]+\)/gi, '#000')
-    .replace(/style="[^"]*"/gi, (match) => {
-      // Mantém estilos de layout mas força cores
-      return match
-        .replace(/color\s*:\s*[^;"]+/gi, 'color:#000')
-        .replace(/background\s*:\s*[^;"]+/gi, 'background:#fff');
-    });
+    .replace(/var\(--[^)]+\)/gi, '#000');
 
-  // CSS agressivo que sobrescreve TUDO
   const resetCSS = `
-    @page { size: WIDTHPLACEHOLDER HEIGHTPLACEHOLDER; margin: 0; }
+    @page { size: WIDTHmm HEIGHTmm; margin: 0; }
     *, *::before, *::after {
       color: #000 !important;
       background: #fff !important;
       background-color: #fff !important;
       -webkit-print-color-adjust: exact !important;
-      print-color-adjust: exact !important;
-      color-adjust: exact !important;
-      -webkit-font-smoothing: none !important;
     }
-    html, body {
-      margin: 0 !important;
-      padding: 0 !important;
-    }
+    html, body { margin: 0 !important; padding: 0 !important; }
     body {
       font-family: 'Courier New', monospace;
       font-size: 14px;
       font-weight: bold;
-      width: WIDTHPLACEHOLDER;
+      width: WIDTHmm;
       padding: 1mm 2mm 0 2mm;
       color: #000 !important;
     }
@@ -309,15 +295,12 @@ async function printSilentElectron(html, opts = {}) {
     .print-ticket { padding: 0; width: 100%; margin: 0; }
   `;
 
-  // Renderiza pra medir a altura
-  const measureHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>${resetCSS.replace(/WIDTHPLACEHOLDER/g, widthMm+'mm').replace(/HEIGHTPLACEHOLDER/g, 'auto')}</style>
-</head><body>${safeHtml}</body></html>`;
-
+  // PASSO 1: Mede a altura real do conteúdo
+  const measureCss = resetCSS.replace(/WIDTH/g, String(widthMm)).replace(/HEIGHT/g, '2000');
+  const measureHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${measureCss}</style></head><body>${safeHtml}</body></html>`;
   const measureFile = path.join(os.tmpdir(), 'ef-measure-' + Date.now() + '.html');
   fs.writeFileSync(measureFile, measureHtml, 'utf-8');
 
-  // Janela de medição com largura proporcional ao papel (96 DPI) para scrollHeight preciso
   const measureWinWidth = Math.round(widthMm / 25.4 * 96) + 20;
   const measureWin = new BrowserWindow({
     show: false, width: measureWinWidth, height: 4000,
@@ -325,11 +308,9 @@ async function printSilentElectron(html, opts = {}) {
   });
 
   await measureWin.loadFile(measureFile);
-  await new Promise(r => setTimeout(r, 600));
+  await new Promise(r => setTimeout(r, 500));
 
   const contentHeight = await measureWin.webContents.executeJavaScript('document.body.scrollHeight');
-  // Altura justa: converte px para mm (0.265) com margem mínima de 3mm
-  // Sem forçar altura mínima grande — evita espaço branco em impressoras térmicas
   const heightMm = Math.ceil(contentHeight * 0.265) + 3;
   measureWin.close();
   try { fs.unlinkSync(measureFile); } catch {}
@@ -337,10 +318,8 @@ async function printSilentElectron(html, opts = {}) {
   log('🖨️ Medido:', contentHeight + 'px →', heightMm + 'mm | largura:', widthMm + 'mm');
 
   // PASSO 2: Gera HTML com @page size exato
-  const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>${resetCSS.replace(/WIDTHPLACEHOLDER/g, widthMm+'mm').replace(/HEIGHTPLACEHOLDER/g, heightMm+'mm')}</style>
-</head><body>${safeHtml}</body></html>`;
-
+  const printCss = resetCSS.replace(/WIDTH/g, String(widthMm)).replace(/HEIGHT/g, String(heightMm));
+  const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${printCss}</style></head><body>${safeHtml}</body></html>`;
   const printFile = path.join(os.tmpdir(), 'ef-print-' + Date.now() + '.html');
   fs.writeFileSync(printFile, printHtml, 'utf-8');
 
@@ -353,97 +332,59 @@ async function printSilentElectron(html, opts = {}) {
     await printWin.loadFile(printFile);
     await new Promise(r => setTimeout(r, 500));
 
-    // PASSO 3: Imprime direto via webContents.print() — sem gerar PDF intermediário
-    // Isso elimina o espaço branco que aparece em algumas impressoras térmicas
-    const printResult = await new Promise((resolve) => {
-      printWin.webContents.print({
-        silent: true,
-        printBackground: true,
-        deviceName: printer || '',
-        margins: { marginType: 'none' },
-        pageSize: { width: widthMm * 1000, height: heightMm * 1000 }, // microns
-        scaleFactor: 100,
-        landscape: false,
-      }, (success, failureReason) => {
-        resolve({ ok: success, error: failureReason });
-      });
-    });
-
-    printWin.close();
-
-    if (printResult.ok) {
-      log('✅ Impresso via webContents.print()' + (printer ? ' → ' + printer : ''));
-      try { fs.unlinkSync(printFile); } catch {}
-      return { ok: true };
-    }
-
-    log('⚠️ webContents.print() falhou:', printResult.error, '| Tentando PDF fallback...');
-
-    // FALLBACK: gera PDF e imprime via pdf-to-printer
-    const printWin2 = new BrowserWindow({
-      show: false, width: 800, height: 2000,
-      webPreferences: { contextIsolation: true, nodeIntegration: false },
-    });
-    await printWin2.loadFile(printFile);
-    await new Promise(r => setTimeout(r, 500));
-
-    const pdfBuffer = await printWin2.webContents.printToPDF({
+    // PASSO 3: Gera PDF com tamanho exato
+    const pdfBuffer = await printWin.webContents.printToPDF({
       preferCSSPageSize: true,
       printBackground: true,
       landscape: false,
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
-    printWin2.close();
+    printWin.close();
 
     const pdfFile = path.join(os.tmpdir(), 'ef-receipt-' + Date.now() + '.pdf');
     fs.writeFileSync(pdfFile, pdfBuffer);
-    log('📄 PDF fallback:', Math.round(pdfBuffer.length / 1024) + 'KB');
+    log('📄 PDF:', Math.round(pdfBuffer.length / 1024) + 'KB | tamanho:', widthMm + 'x' + heightMm + 'mm');
 
+    // PASSO 4: Imprime — noscale pra não criar margem
     try {
       const ptp = require('pdf-to-printer');
       const printOpts = { scale: 'noscale' };
       if (printer) printOpts.printer = printer;
       await ptp.print(pdfFile, printOpts);
-      log('✅ Impresso via pdf-to-printer (fallback)' + (printer ? ' → ' + printer : ''));
+      log('✅ Impresso (noscale)' + (printer ? ' → ' + printer : ''));
     } catch (ptpErr) {
       log('⚠️ pdf-to-printer falhou:', ptpErr.message);
-      // Último fallback: SumatraPDF
       const { exec } = require('child_process');
       let sumatraPath;
       try {
         const ptpPath = require.resolve('pdf-to-printer');
         const ptpDir = path.dirname(ptpPath);
-        const possible = [
-          path.join(ptpDir, 'SumatraPDF.exe'),
-          path.join(ptpDir, '..', 'SumatraPDF.exe'),
-          path.join(ptpDir, 'SumatraPDF-3.4.6-64.exe'),
-          path.join(ptpDir, '..', 'SumatraPDF-3.4.6-64.exe'),
-        ];
-        for (const p of possible) { if (fs.existsSync(p)) { sumatraPath = p; break; } }
+        for (const p of [path.join(ptpDir,'SumatraPDF.exe'),path.join(ptpDir,'..','SumatraPDF.exe'),path.join(ptpDir,'SumatraPDF-3.4.6-64.exe'),path.join(ptpDir,'..','SumatraPDF-3.4.6-64.exe')]) {
+          if (fs.existsSync(p)) { sumatraPath = p; break; }
+        }
       } catch {}
       if (!sumatraPath) {
-        const paths = [
-          'C:\\Program Files\\SumatraPDF\\SumatraPDF.exe',
-          'C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe',
-          path.join(process.env.LOCALAPPDATA || '', 'SumatraPDF', 'SumatraPDF.exe'),
-        ];
-        for (const p of paths) { try { if (fs.existsSync(p)) { sumatraPath = p; break; } } catch {} }
+        for (const p of ['C:\\Program Files\\SumatraPDF\\SumatraPDF.exe','C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe',path.join(process.env.LOCALAPPDATA||'','SumatraPDF','SumatraPDF.exe')]) {
+          try { if (fs.existsSync(p)) { sumatraPath = p; break; } } catch {}
+        }
       }
       if (sumatraPath) {
         const cmd = printer
-          ? `"${sumatraPath}" -print-to "${printer}" -silent "${pdfFile}"`
-          : `"${sumatraPath}" -print-to-default -silent "${pdfFile}"`;
-        await new Promise((resolve, reject) => {
-          exec(cmd, (err) => err ? reject(err) : resolve());
-        });
-        log('✅ Impresso via SumatraPDF' + (printer ? ' → ' + printer : ''));
+          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "noscale" -silent "${pdfFile}"`
+          : `"${sumatraPath}" -print-to-default -print-settings "noscale" -silent "${pdfFile}"`;
+        await new Promise(r => exec(cmd, { timeout: 15000 }, () => r()));
+        log('✅ Impresso via SumatraPDF (noscale)');
       } else {
-        throw new Error('Nenhum método de impressão disponível');
+        const cmd = printer
+          ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo '${printer}' -WindowStyle Hidden"`
+          : `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb Print -WindowStyle Hidden"`;
+        await new Promise(r => exec(cmd, { timeout: 15000 }, () => r()));
+        log('✅ Impresso via PowerShell');
       }
     }
 
     try { fs.unlinkSync(printFile); } catch {}
-    try { fs.unlinkSync(pdfFile); } catch {}
+    setTimeout(() => { try { fs.unlinkSync(pdfFile); } catch {} }, 5000);
     return { ok: true };
 
   } catch (e) {
@@ -453,6 +394,7 @@ async function printSilentElectron(html, opts = {}) {
     throw e;
   }
 }
+
 
 // ── Impressão ESC/POS via USB ───────────────────────────────
 async function printEscPosUsb(order, cfg) {
