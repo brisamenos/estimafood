@@ -79,6 +79,46 @@ function createWindow() {
   const serverUrl = store.get('serverUrl');
   if (serverUrl) {
     log('🌐 Carregando:', serverUrl);
+
+    // ── Auto-login: injeta sessão ANTES dos scripts da página ──
+    // did-finish-load é TARDE DEMAIS (gestor-core.js já redirecionou para login.html).
+    // Usamos webRequest para injetar um <script> no início do HTML que restaura a sessão
+    // antes de qualquer outro script executar.
+    const savedSession = store.get('_savedSession');
+    if (savedSession) {
+      const age = Date.now() - (savedSession.ts || 0);
+      if (age < 30 * 24 * 60 * 60 * 1000) {
+        const sessionStr = JSON.stringify(JSON.stringify(savedSession));
+        const injectScript = `<script>try{sessionStorage.setItem("sys_session",${sessionStr})}catch(e){}</script>`;
+        const { session: ses } = mainWindow.webContents;
+        ses.webRequest.onBeforeRequest({ urls: [serverUrl.replace(/\/[^/]*$/, '') + '/*'] }, (details, cb) => {
+          cb({ cancel: false });
+        });
+        // Injeta no <head> assim que o HTML chegar
+        ses.webRequest.onHeadersReceived((details, cb) => {
+          cb({ responseHeaders: details.responseHeaders });
+        });
+        // Usa executeJavaScript no dom-ready com proteção contra redirecionamento
+        mainWindow.webContents.on('dom-ready', () => {
+          const currentUrl = mainWindow.webContents.getURL();
+          // Se já redirecionou para login.html, força voltar com a sessão
+          if (currentUrl.includes('login.html')) {
+            const ss = store.get('_savedSession');
+            if (ss && (Date.now() - (ss.ts || 0)) < 30 * 24 * 60 * 60 * 1000) {
+              log('[SESSION] Redirecionado para login — forçando restauração');
+              const ssStr = JSON.stringify(JSON.stringify(ss));
+              mainWindow.webContents.executeJavaScript(
+                'try{sessionStorage.setItem("sys_session",' + ssStr + ');window.location.href="' + serverUrl + '"}catch(e){}'
+              ).catch(() => {});
+            }
+          }
+        });
+        log('[SESSION] Sessão salva encontrada:', savedSession.nome || '?');
+      } else {
+        store.delete('_savedSession');
+      }
+    }
+
     mainWindow.loadURL(serverUrl).catch(err => {
       log('❌ Erro ao carregar URL:', err.message);
       mainWindow.loadFile(path.join(__dirname, 'offline.html'));
@@ -142,21 +182,6 @@ function createWindow() {
     mainWindow.webContents.insertCSS(`
       .pwa-install-banner, .update-toast { display: none !important; }
     `).catch(() => {});
-
-    // Auto-login seguro — sem async, sem template literal
-    const savedSession = store.get('_savedSession');
-    if (savedSession) {
-      const age = Date.now() - (savedSession.ts || 0);
-      if (age < 30 * 24 * 60 * 60 * 1000) {
-        const sessionStr = JSON.stringify(savedSession);
-        mainWindow.webContents.executeJavaScript(
-          'try{sessionStorage.setItem("sys_session",' + JSON.stringify(sessionStr) + ')}catch(e){}'
-        ).catch(() => {});
-        log('[SESSION] Sessão restaurada:', savedSession.nome || '?');
-      } else {
-        store.delete('_savedSession');
-      }
-    }
   });
 }
 
@@ -737,18 +762,31 @@ function buildEscPosBytes(order, cfg) {
     const name = (i.qty + 'x ' + i.name).toUpperCase().substring(0, maxName);
     const price = money((i.price || 0) * (i.qty || 1));
     line(pad2col(name, price));
-    if (i.obs) line('  * ' + i.obs);
+    // Formata itens do kit em linhas separadas
+    let obsText = i.obs || '';
+    if (obsText.startsWith('Kit: ')) {
+      const pipeIdx = obsText.indexOf(' | ');
+      const kitPart = pipeIdx > -1 ? obsText.substring(5, pipeIdx) : obsText.substring(5);
+      obsText = pipeIdx > -1 ? obsText.substring(pipeIdx + 3) : '';
+      const kitItens = kitPart.split(' · ').filter(Boolean);
+      line('  CONTEM:');
+      kitItens.forEach(k => line('  - ' + k.trim()));
+    }
+    if (obsText) line('  * ' + obsText);
   });
   line(sep);
 
   // ── Totais ──
   const subtotal = items.reduce((s, i) => s + (parseFloat(i.price || 0) * (i.qty || 1)), 0);
   const taxa = parseFloat(order.taxa || 0);
-  const total = subtotal + taxa;
+  const orderTotal = parseFloat(order.total);
+  const desconto = (!isNaN(orderTotal) && orderTotal < subtotal) ? Math.max(0, subtotal - orderTotal) : 0;
+  const total = (!isNaN(orderTotal) ? orderTotal : subtotal) + taxa;
 
-  if (taxa > 0) {
+  if (taxa > 0 || desconto > 0) {
     line(pad2col('Subtotal', money(subtotal)));
-    line(pad2col('Taxa entrega', money(taxa)));
+    if (desconto > 0) line(pad2col('Desconto', '-' + money(desconto)));
+    if (taxa > 0) line(pad2col('Taxa entrega', money(taxa)));
   }
   raw(0x1B, 0x45, 0x01); // Negrito ON
   line(pad2col('TOTAL', money(total)));
@@ -897,19 +935,32 @@ function buildTicketHtml(order, cfg) {
   const itemLines = items.map(i => {
     const name = (i.qty + 'x ' + i.name).toUpperCase();
     const price = money((i.price || 0) * (i.qty || 1));
-    return `<div style="display:flex;justify-content:space-between"><span>${name}</span><span style="white-space:nowrap;margin-left:8px">${price}</span></div>`;
+    // Formata itens do kit
+    let kitHtml = '';
+    let obsText = i.obs || '';
+    if (obsText.startsWith('Kit: ')) {
+      const pipeIdx = obsText.indexOf(' | ');
+      const kitPart = pipeIdx > -1 ? obsText.substring(5, pipeIdx) : obsText.substring(5);
+      obsText = pipeIdx > -1 ? obsText.substring(pipeIdx + 3) : '';
+      const kitItens = kitPart.split(' · ').filter(Boolean);
+      kitHtml = `<div style="padding-left:4px;font-size:0.82em;color:#222;border-left:2px solid #555;margin:2px 0 3px">
+        <div style="font-weight:bold;margin-bottom:1px">CONTÉM:</div>
+        ${kitItens.map(k => `<div>• ${k.trim()}</div>`).join('')}
+      </div>`;
+    }
+    const obsHtml = obsText ? `<div style="font-size:0.9em;color:#333;padding-left:4px;border-left:2px solid #999;margin:2px 0 3px">OBS: ${obsText}</div>` : '';
+    return `<div style="display:flex;justify-content:space-between"><span>${name}</span><span style="white-space:nowrap;margin-left:8px">${price}</span></div>${kitHtml}${obsHtml}`;
   }).join('');
 
   const subtotal = items.reduce((s, i) => s + (parseFloat(i.price || 0) * (i.qty || 1)), 0);
   const taxa = parseFloat(order.taxa || 0);
-  const total = subtotal + taxa;
-
-  let obsLines = '';
-  items.forEach(i => {
-    if (i.obs) obsLines += `<div style="font-size:0.9em;color:#333">  ↳ ${i.obs}</div>`;
-  });
+  const orderTotal = parseFloat(order.total);
+  const desconto = (!isNaN(orderTotal) && orderTotal < subtotal) ? Math.max(0, subtotal - orderTotal) : 0;
+  const total = (!isNaN(orderTotal) ? orderTotal : subtotal) + taxa;
 
   const orderNum = order.num || order.id;
+
+  const descontoLine = desconto > 0 ? `<div style="display:flex;justify-content:space-between;color:#333"><span>Desconto</span><span>−${money(desconto)}</span></div>` : '';
 
   return `<div class="print-ticket" style="font-size:${fs}px">
     <div class="pt-center pt-large">${cfg.nome || 'ESTIMA FOOD'}</div>
@@ -922,9 +973,8 @@ function buildTicketHtml(order, cfg) {
     ${order.mesa_num ? `<div>Mesa: ${order.mesa_num}</div>` : ''}
     <hr class="pt-hr">
     ${itemLines}
-    ${obsLines}
     <hr class="pt-hr">
-    ${taxa > 0 ? `<div style="display:flex;justify-content:space-between"><span>Subtotal</span><span>${money(subtotal)}</span></div><div style="display:flex;justify-content:space-between"><span>Taxa entrega</span><span>${money(taxa)}</span></div>` : ''}
+    ${(taxa > 0 || desconto > 0) ? `<div style="display:flex;justify-content:space-between"><span>Subtotal</span><span>${money(subtotal)}</span></div>${descontoLine}${taxa > 0 ? `<div style="display:flex;justify-content:space-between"><span>Taxa entrega</span><span>${money(taxa)}</span></div>` : ''}` : ''}
     <div style="display:flex;justify-content:space-between;font-weight:bold"><span>TOTAL</span><span>${money(total)}</span></div>
     ${order.pag ? `<div>Pagamento: ${order.pag}</div>` : ''}
     <hr class="pt-hr">
@@ -950,6 +1000,11 @@ function setupIPC() {
       networkPrinterIp: store.get('networkPrinterIp'),
       networkPrinterPort: store.get('networkPrinterPort'),
       printCopies: store.get('printCopies'),
+      printer_caixa: store.get('printer_caixa') || '',
+      printer_cozinha: store.get('printer_cozinha') || '',
+      printViaMode: store.get('printViaMode') || '',
+      printFormat: store.get('printFormat') || '',
+      printMode: store.get('printMode') || '',
     };
   });
 
@@ -965,6 +1020,12 @@ function setupIPC() {
     if (cfg.networkPrinterIp !== undefined) store.set('networkPrinterIp', cfg.networkPrinterIp);
     if (cfg.networkPrinterPort !== undefined) store.set('networkPrinterPort', cfg.networkPrinterPort);
     if (cfg.printCopies !== undefined) store.set('printCopies', cfg.printCopies);
+    // Campos extras do sistema de impressoras/modelos
+    if (cfg.printer_caixa !== undefined)   store.set('printer_caixa', cfg.printer_caixa);
+    if (cfg.printer_cozinha !== undefined) store.set('printer_cozinha', cfg.printer_cozinha);
+    if (cfg.printViaMode !== undefined)    store.set('printViaMode', cfg.printViaMode);
+    if (cfg.printFormat !== undefined)     store.set('printFormat', cfg.printFormat);
+    if (cfg.printMode !== undefined)       store.set('printMode', cfg.printMode);
     // Atualiza tray
     if (tray) createTray();
     log('💾 Config salva:', JSON.stringify(cfg));
