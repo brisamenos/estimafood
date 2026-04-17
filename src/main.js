@@ -311,7 +311,9 @@ async function printSilentElectron(html, opts = {}) {
   await new Promise(r => setTimeout(r, 500));
 
   const contentHeight = await measureWin.webContents.executeJavaScript('document.body.scrollHeight');
-  const heightMm = Math.ceil(contentHeight * 0.265) + 3;
+  // Altura justa mas SEMPRE maior que a largura pra forçar retrato
+  const rawHeight = Math.ceil(contentHeight * 0.265) + 3;
+  const heightMm = Math.max(rawHeight, widthMm + 1);
   measureWin.close();
   try { fs.unlinkSync(measureFile); } catch {}
 
@@ -348,7 +350,7 @@ async function printSilentElectron(html, opts = {}) {
     // PASSO 4: Imprime — noscale pra não criar margem
     try {
       const ptp = require('pdf-to-printer');
-      const printOpts = { scale: 'noscale' };
+      const printOpts = { scale: 'noscale', orientation: 'portrait' };
       if (printer) printOpts.printer = printer;
       await ptp.print(pdfFile, printOpts);
       log('✅ Impresso (noscale)' + (printer ? ' → ' + printer : ''));
@@ -370,8 +372,8 @@ async function printSilentElectron(html, opts = {}) {
       }
       if (sumatraPath) {
         const cmd = printer
-          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "noscale" -silent "${pdfFile}"`
-          : `"${sumatraPath}" -print-to-default -print-settings "noscale" -silent "${pdfFile}"`;
+          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "noscale,portrait" -silent "${pdfFile}"`
+          : `"${sumatraPath}" -print-to-default -print-settings "noscale,portrait" -silent "${pdfFile}"`;
         await new Promise(r => exec(cmd, { timeout: 15000 }, () => r()));
         log('✅ Impresso via SumatraPDF (noscale)');
       } else {
