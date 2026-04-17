@@ -351,98 +351,99 @@ async function printSilentElectron(html, opts = {}) {
 
   try {
     await printWin.loadFile(printFile);
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise(r => setTimeout(r, 500));
 
-    // PASSO 3: Gera PDF — preferCSSPageSize faz o Chromium usar o @page do CSS
-    const pdfBuffer = await printWin.webContents.printToPDF({
+    // PASSO 3: Imprime direto via webContents.print() — sem gerar PDF intermediário
+    // Isso elimina o espaço branco que aparece em algumas impressoras térmicas
+    const printResult = await new Promise((resolve) => {
+      printWin.webContents.print({
+        silent: true,
+        printBackground: true,
+        deviceName: printer || '',
+        margins: { marginType: 'none' },
+        pageSize: { width: widthMm * 1000, height: heightMm * 1000 }, // microns
+        scaleFactor: 100,
+        landscape: false,
+      }, (success, failureReason) => {
+        resolve({ ok: success, error: failureReason });
+      });
+    });
+
+    printWin.close();
+
+    if (printResult.ok) {
+      log('✅ Impresso via webContents.print()' + (printer ? ' → ' + printer : ''));
+      try { fs.unlinkSync(printFile); } catch {}
+      return { ok: true };
+    }
+
+    log('⚠️ webContents.print() falhou:', printResult.error, '| Tentando PDF fallback...');
+
+    // FALLBACK: gera PDF e imprime via pdf-to-printer
+    const printWin2 = new BrowserWindow({
+      show: false, width: 800, height: 2000,
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    });
+    await printWin2.loadFile(printFile);
+    await new Promise(r => setTimeout(r, 500));
+
+    const pdfBuffer = await printWin2.webContents.printToPDF({
       preferCSSPageSize: true,
       printBackground: true,
       landscape: false,
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
-
-    printWin.close();
+    printWin2.close();
 
     const pdfFile = path.join(os.tmpdir(), 'ef-receipt-' + Date.now() + '.pdf');
     fs.writeFileSync(pdfFile, pdfBuffer);
-    log('📄 PDF:', Math.round(pdfBuffer.length / 1024) + 'KB | tamanho:', widthMm + 'x' + heightMm + 'mm');
+    log('📄 PDF fallback:', Math.round(pdfBuffer.length / 1024) + 'KB');
 
-    // DEBUG: salva cópia na Área de Trabalho pra verificar visualmente
-    try {
-      const desktop = path.join(os.homedir(), 'Desktop');
-      const debugPdf = path.join(desktop, 'EstimaFood-DEBUG.pdf');
-      const debugHtml = path.join(desktop, 'EstimaFood-DEBUG.html');
-      fs.writeFileSync(debugPdf, pdfBuffer);
-      fs.writeFileSync(debugHtml, printHtml, 'utf-8');
-      log('🔍 DEBUG: PDF e HTML salvos na Área de Trabalho');
-    } catch (dbgErr) { log('⚠️ Debug save:', dbgErr.message); }
-
-    // PASSO 4: Imprime o PDF silenciosamente
     try {
       const ptp = require('pdf-to-printer');
-      const printOpts = {
-        scale: 'fit',  // fit = preenche o papel na DPI nativa da impressora térmica (mais escuro)
-      };
+      const printOpts = { scale: 'noscale' };
       if (printer) printOpts.printer = printer;
       await ptp.print(pdfFile, printOpts);
-      log('✅ Impresso via pdf-to-printer (fit)' + (printer ? ' → ' + printer : '')); //' + (printer ? ' → ' + printer : ''));
+      log('✅ Impresso via pdf-to-printer (fallback)' + (printer ? ' → ' + printer : ''));
     } catch (ptpErr) {
-      log('⚠️ pdf-to-printer falhou:', ptpErr.message, '| Tentando SumatraPDF direto...');
-
-      // Fallback: chama SumatraPDF empacotado pelo pdf-to-printer
+      log('⚠️ pdf-to-printer falhou:', ptpErr.message);
+      // Último fallback: SumatraPDF
       const { exec } = require('child_process');
       let sumatraPath;
       try {
         const ptpPath = require.resolve('pdf-to-printer');
         const ptpDir = path.dirname(ptpPath);
-        // pdf-to-printer embute SumatraPDF em dist/
         const possible = [
           path.join(ptpDir, 'SumatraPDF.exe'),
           path.join(ptpDir, '..', 'SumatraPDF.exe'),
           path.join(ptpDir, 'SumatraPDF-3.4.6-64.exe'),
           path.join(ptpDir, '..', 'SumatraPDF-3.4.6-64.exe'),
         ];
-        for (const p of possible) {
-          if (fs.existsSync(p)) { sumatraPath = p; break; }
-        }
+        for (const p of possible) { if (fs.existsSync(p)) { sumatraPath = p; break; } }
       } catch {}
-
-      // Tenta também em Program Files
       if (!sumatraPath) {
         const paths = [
           'C:\\Program Files\\SumatraPDF\\SumatraPDF.exe',
           'C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe',
           path.join(process.env.LOCALAPPDATA || '', 'SumatraPDF', 'SumatraPDF.exe'),
         ];
-        for (const p of paths) {
-          try { if (fs.existsSync(p)) { sumatraPath = p; break; } } catch {}
-        }
+        for (const p of paths) { try { if (fs.existsSync(p)) { sumatraPath = p; break; } } catch {} }
       }
-
       if (sumatraPath) {
         const cmd = printer
-          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "fit" -silent "${pdfFile}"`
-          : `"${sumatraPath}" -print-to-default -print-settings "fit" -silent "${pdfFile}"`;
-        log('🖨️ SumatraPDF:', cmd);
-        await new Promise((resolve) => {
-          exec(cmd, { timeout: 15000 }, () => resolve());
+          ? `"${sumatraPath}" -print-to "${printer}" -silent "${pdfFile}"`
+          : `"${sumatraPath}" -print-to-default -silent "${pdfFile}"`;
+        await new Promise((resolve, reject) => {
+          exec(cmd, (err) => err ? reject(err) : resolve());
         });
-        log('✅ Impresso via SumatraPDF direto');
+        log('✅ Impresso via SumatraPDF' + (printer ? ' → ' + printer : ''));
       } else {
-        // Último fallback: PowerShell
-        const cmd = printer
-          ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo '${printer}' -WindowStyle Hidden"`
-          : `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb Print -WindowStyle Hidden"`;
-        await new Promise((resolve) => {
-          exec(cmd, { timeout: 15000 }, () => resolve());
-        });
-        log('✅ Impresso via PowerShell');
+        throw new Error('Nenhum método de impressão disponível');
       }
     }
 
-    // Limpa
     try { fs.unlinkSync(printFile); } catch {}
-    setTimeout(() => { try { fs.unlinkSync(pdfFile); } catch {} }, 5000);
+    try { fs.unlinkSync(pdfFile); } catch {}
     return { ok: true };
 
   } catch (e) {
