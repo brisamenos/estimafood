@@ -291,19 +291,22 @@ async function printSilentElectron(html, opts = {}) {
       color-adjust: exact !important;
       -webkit-font-smoothing: none !important;
     }
+    html, body {
+      margin: 0 !important;
+      padding: 0 !important;
+    }
     body {
       font-family: 'Courier New', monospace;
       font-size: 14px;
       font-weight: bold;
       width: WIDTHPLACEHOLDER;
-      margin: 0;
-      padding: 2mm;
+      padding: 1mm 2mm 0 2mm;
       color: #000 !important;
     }
     hr, .pt-hr { border: none !important; border-top: 2px solid #000 !important; margin: 4px 0; background: transparent !important; }
     .pt-center { text-align: center; }
     .pt-large { font-size: 17px; font-weight: bold; }
-    .print-ticket { padding: 0; width: 100%; }
+    .print-ticket { padding: 0; width: 100%; margin: 0; }
   `;
 
   // Renderiza pra medir a altura
@@ -325,8 +328,9 @@ async function printSilentElectron(html, opts = {}) {
   await new Promise(r => setTimeout(r, 600));
 
   const contentHeight = await measureWin.webContents.executeJavaScript('document.body.scrollHeight');
-  // Garante retrato: altura sempre maior que a largura do papel (evita impressão em paisagem)
-  const heightMm = Math.max(Math.ceil(contentHeight * 0.265) + 15, widthMm + 20);
+  // Altura justa: converte px para mm (0.265) com margem mínima de 3mm
+  // Sem forçar altura mínima grande — evita espaço branco em impressoras térmicas
+  const heightMm = Math.ceil(contentHeight * 0.265) + 3;
   measureWin.close();
   try { fs.unlinkSync(measureFile); } catch {}
 
@@ -353,6 +357,7 @@ async function printSilentElectron(html, opts = {}) {
     const pdfBuffer = await printWin.webContents.printToPDF({
       preferCSSPageSize: true,
       printBackground: true,
+      landscape: false,
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
