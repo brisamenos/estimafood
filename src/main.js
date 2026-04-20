@@ -285,8 +285,10 @@ async function printSilentElectron(html, opts = {}) {
       font-family: 'Courier New', monospace;
       font-size: 14px;
       font-weight: bold;
+      box-sizing: border-box;
       width: WIDTHmm;
-      padding: 2mm 5mm 2mm 5mm;
+      margin: 0 !important;
+      padding: 2mm 5mm 2mm 5mm !important;
       color: #000 !important;
     }
     hr, .pt-hr { border: none !important; border-top: 2px solid #000 !important; margin: 4px 0; background: transparent !important; }
