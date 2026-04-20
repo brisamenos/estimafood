@@ -286,7 +286,7 @@ async function printSilentElectron(html, opts = {}) {
       font-size: 14px;
       font-weight: bold;
       width: WIDTHmm;
-      padding: 1mm 2mm 0 2mm;
+      padding: 2mm 5mm 2mm 5mm;
       color: #000 !important;
     }
     hr, .pt-hr { border: none !important; border-top: 2px solid #000 !important; margin: 4px 0; background: transparent !important; }
@@ -326,7 +326,7 @@ async function printSilentElectron(html, opts = {}) {
   fs.writeFileSync(printFile, printHtml, 'utf-8');
 
   const printWin = new BrowserWindow({
-    show: false, width: 800, height: 2000,
+    show: false, width: measureWinWidth, height: 2000,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
 
