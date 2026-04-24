@@ -318,9 +318,10 @@ async function printSilentElectron(html, opts = {}) {
       box-sizing: border-box;
       width: WIDTHmm;
       margin: 0 !important;
-      /* SEM padding lateral: o PDF já está no tamanho da área imprimível.
-         O driver da impressora centraliza e a folga física do papel faz o resto. */
-      padding: 0 !important;
+      /* Padding esquerdo de 2mm compensa drivers que alinham à esquerda
+         com margem morta (Epson TM-T20X). Em impressoras que centralizam
+         (Elgin), é apenas folga extra — não atrapalha. */
+      padding: 0 0 0 2mm !important;
       color: #000 !important;
       overflow: hidden !important;
     }
