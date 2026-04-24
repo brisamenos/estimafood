@@ -263,9 +263,18 @@ async function printSilentElectron(html, opts = {}) {
   const paperWidth = opts.paperWidth || store.get('paperWidth') || 80;
   const widthMm = paperWidth === 58 ? 58 : 80;
 
+  // Área IMPRIMÍVEL segura (impressoras térmicas têm borda não-imprimível ~4mm cada lado)
+  // 80mm bobina → área útil ~72mm | 58mm bobina → área útil ~48mm
+  // Usamos uma margem lateral conservadora dentro do @page para garantir que NADA seja cortado
+  const sideMarginMm = widthMm === 58 ? 3 : 4;
+  const contentWidthMm = widthMm - (sideMarginMm * 2);
+  // Fonte menor em bobina 58mm pra caber mais texto sem quebrar feio
+  const baseFontPx = widthMm === 58 ? 11 : 13;
+  const largeFontPx = widthMm === 58 ? 14 : 16;
+
   const cleanHtml = html.includes('<html') ? html.replace(/.*<body[^>]*>/is,'').replace(/<\/body>.*/is,'') : html;
 
-  // Limpa cores do tema escuro
+  // Limpa cores do tema escuro E remove larguras fixas em px que podem estourar
   let safeHtml = cleanHtml
     .replace(/color\s*:\s*[^;"']+/gi, 'color:#000')
     .replace(/background\s*:\s*[^;"']+/gi, 'background:#fff')
@@ -279,26 +288,52 @@ async function printSilentElectron(html, opts = {}) {
       background: #fff !important;
       background-color: #fff !important;
       -webkit-print-color-adjust: exact !important;
+      box-sizing: border-box !important;
+      /* Quebra palavras/URLs/textos longos pra NUNCA estourar a largura */
+      word-wrap: break-word !important;
+      overflow-wrap: anywhere !important;
+      word-break: break-word !important;
+      max-width: 100% !important;
     }
     html, body { margin: 0 !important; padding: 0 !important; }
     body {
-      font-family: 'Courier New', monospace;
-      font-size: 14px;
+      font-family: 'Courier New', 'Consolas', monospace;
+      font-size: FONTPXpx;
       font-weight: bold;
+      line-height: 1.25;
       box-sizing: border-box;
       width: WIDTHmm;
       margin: 0 !important;
-      padding: 2mm 5mm 2mm 5mm !important;
+      /* Padding lateral GARANTE que conteúdo fique dentro da área imprimível */
+      padding: 2mm SIDEMMmm 4mm SIDEMMmm !important;
       color: #000 !important;
+      overflow: hidden !important;
     }
-    hr, .pt-hr { border: none !important; border-top: 2px solid #000 !important; margin: 4px 0; background: transparent !important; }
+    /* Qualquer elemento com largura fixa inline é neutralizado */
+    [style*="width:"] { max-width: 100% !important; }
+    img, svg, table, div, p, span { max-width: 100% !important; }
+    table { width: 100% !important; table-layout: fixed !important; border-collapse: collapse !important; }
+    td, th { word-wrap: break-word !important; overflow-wrap: anywhere !important; }
+    hr, .pt-hr { border: none !important; border-top: 2px solid #000 !important; margin: 4px 0; background: transparent !important; width: 100% !important; }
     .pt-center { text-align: center; }
-    .pt-large { font-size: 17px; font-weight: bold; }
+    .pt-large { font-size: LARGEPXpx; font-weight: bold; }
     .print-ticket { padding: 0; width: 100%; margin: 0; }
+    /* Linhas flex com nome+preço: nome quebra, preço fica inteiro */
+    div[style*="space-between"] { display: flex !important; justify-content: space-between !important; gap: 4px; align-items: flex-start; }
+    div[style*="space-between"] > span:first-child { flex: 1 1 auto; min-width: 0; word-wrap: break-word; overflow-wrap: anywhere; }
+    div[style*="space-between"] > span:last-child { flex: 0 0 auto; white-space: nowrap; }
   `;
 
+  // Função helper pra aplicar todos os placeholders
+  const applyVars = (css, h) => css
+    .replace(/WIDTH/g, String(widthMm))
+    .replace(/HEIGHT/g, String(h))
+    .replace(/FONTPX/g, String(baseFontPx))
+    .replace(/LARGEPX/g, String(largeFontPx))
+    .replace(/SIDEMM/g, String(sideMarginMm));
+
   // PASSO 1: Mede a altura real do conteúdo
-  const measureCss = resetCSS.replace(/WIDTH/g, String(widthMm)).replace(/HEIGHT/g, '2000');
+  const measureCss = applyVars(resetCSS, '2000');
   const measureHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${measureCss}</style></head><body>${safeHtml}</body></html>`;
   const measureFile = path.join(os.tmpdir(), 'ef-measure-' + Date.now() + '.html');
   fs.writeFileSync(measureFile, measureHtml, 'utf-8');
@@ -313,8 +348,9 @@ async function printSilentElectron(html, opts = {}) {
   await new Promise(r => setTimeout(r, 500));
 
   const contentHeight = await measureWin.webContents.executeJavaScript('document.body.scrollHeight');
-  // Altura justa mas SEMPRE maior que a largura pra forçar retrato
-  const rawHeight = Math.ceil(contentHeight * 0.265) + 3;
+  // Converte px → mm (96 DPI: 1mm = ~3.78px, então mm = px / 3.78 ≈ px * 0.2646)
+  // Acrescenta margem inferior de 5mm pra garantir que nada seja cortado embaixo
+  const rawHeight = Math.ceil(contentHeight / 3.78) + 5;
   const heightMm = Math.max(rawHeight, widthMm + 1);
   measureWin.close();
   try { fs.unlinkSync(measureFile); } catch {}
@@ -322,7 +358,7 @@ async function printSilentElectron(html, opts = {}) {
   log('🖨️ Medido:', contentHeight + 'px →', heightMm + 'mm | largura:', widthMm + 'mm');
 
   // PASSO 2: Gera HTML com @page size exato
-  const printCss = resetCSS.replace(/WIDTH/g, String(widthMm)).replace(/HEIGHT/g, String(heightMm));
+  const printCss = applyVars(resetCSS, heightMm);
   const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${printCss}</style></head><body>${safeHtml}</body></html>`;
   const printFile = path.join(os.tmpdir(), 'ef-print-' + Date.now() + '.html');
   fs.writeFileSync(printFile, printHtml, 'utf-8');
