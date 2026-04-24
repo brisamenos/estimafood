@@ -47,6 +47,13 @@ contextBridge.exposeInMainWorld('ElectronPrint', {
   printHtml: (html, opts) => ipcRenderer.invoke('print:html', html, opts || {}),
 
   /**
+   * Imprime uma régua de calibração pra o usuário descobrir a área imprimível
+   * real da impressora dele (em mm). Depois ele coloca esse valor em printableWidth.
+   * @param {{ paperWidth?: number }} opts
+   */
+  calibrate: (opts) => ipcRenderer.invoke('print:calibrate', opts || {}),
+
+  /**
    * Exibe uma notificação nativa do sistema operacional.
    * @param {string} title
    * @param {string} body
