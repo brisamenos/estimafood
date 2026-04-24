@@ -320,7 +320,7 @@ async function printSilentElectron(html, opts = {}) {
       margin: 0 !important;
       /* SEM padding lateral: o PDF já está no tamanho da área imprimível.
          O driver da impressora centraliza e a folga física do papel faz o resto. */
-      padding: 2mm 0 4mm 0 !important;
+      padding: 0 !important;
       color: #000 !important;
       overflow: hidden !important;
     }
@@ -349,20 +349,26 @@ async function printSilentElectron(html, opts = {}) {
   const measureFile = path.join(os.tmpdir(), 'ef-measure-' + Date.now() + '.html');
   fs.writeFileSync(measureFile, measureHtml, 'utf-8');
 
-  const measureWinWidth = Math.round(widthMm / 25.4 * 96) + 20;
+  // Largura da janela em px = largura EXATA do PDF (sem folga).
+  // Assim o scrollHeight bate com a altura real que o conteúdo vai ter no PDF.
+  const measureWinWidth = Math.round(widthMm / 25.4 * 96);
   const measureWin = new BrowserWindow({
     show: false, width: measureWinWidth, height: 4000,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
 
   await measureWin.loadFile(measureFile);
-  await new Promise(r => setTimeout(r, 500));
+  // Espera DOM + fontes carregarem pra scrollHeight ser preciso
+  await new Promise(r => setTimeout(r, 300));
+  await measureWin.webContents.executeJavaScript('document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()').catch(() => {});
+  await new Promise(r => setTimeout(r, 200));
 
-  const contentHeight = await measureWin.webContents.executeJavaScript('document.body.scrollHeight');
-  // Converte px → mm (96 DPI: 1mm = ~3.78px, então mm = px / 3.78 ≈ px * 0.2646)
-  // Acrescenta margem inferior de 5mm pra garantir que nada seja cortado embaixo
-  const rawHeight = Math.ceil(contentHeight / 3.78) + 5;
-  const heightMm = Math.max(rawHeight, widthMm + 1);
+  const contentHeight = await measureWin.webContents.executeJavaScript(
+    'Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, document.body.getBoundingClientRect().height)'
+  );
+  // 96 DPI: 1mm = 3.7795275px. Folga mínima de 1mm só pra não cortar última linha.
+  const rawHeight = Math.ceil(contentHeight / 3.7795275) + 1;
+  const heightMm = Math.max(rawHeight, 20); // altura mínima de 20mm
   measureWin.close();
   try { fs.unlinkSync(measureFile); } catch {}
 
@@ -396,16 +402,17 @@ async function printSilentElectron(html, opts = {}) {
     fs.writeFileSync(pdfFile, pdfBuffer);
     log('📄 PDF:', Math.round(pdfBuffer.length / 1024) + 'KB | tamanho:', widthMm + 'x' + heightMm + 'mm');
 
-    // PASSO 4: Imprime — usa 'fit' pro driver encaixar o PDF dentro da área imprimível.
-    // Como o PDF já saiu com a largura da área imprimível (72mm em vez de 80mm),
-    // 'fit' imprime em tamanho real sem cortar os lados. Se a impressora do cliente
-    // tiver área imprimível diferente, 'fit' ajusta proporcionalmente.
+    // PASSO 4: Imprime em tamanho real (noscale).
+    // O PDF foi gerado com largura = área imprimível segura (70mm), então o driver
+    // imprime exatamente o que está no PDF sem redimensionar vertical/horizontal.
+    // 'fit' escalaria proporcionalmente e aumentaria o espaço em branco se a altura
+    // do PDF for um pouco maior que o conteúdo.
     try {
       const ptp = require('pdf-to-printer');
-      const printOpts = { scale: 'fit', orientation: 'portrait' };
+      const printOpts = { scale: 'noscale', orientation: 'portrait' };
       if (printer) printOpts.printer = printer;
       await ptp.print(pdfFile, printOpts);
-      log('✅ Impresso (fit)' + (printer ? ' → ' + printer : ''));
+      log('✅ Impresso (noscale)' + (printer ? ' → ' + printer : ''));
     } catch (ptpErr) {
       log('⚠️ pdf-to-printer falhou:', ptpErr.message);
       const { exec } = require('child_process');
@@ -424,10 +431,10 @@ async function printSilentElectron(html, opts = {}) {
       }
       if (sumatraPath) {
         const cmd = printer
-          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "fit,portrait" -silent "${pdfFile}"`
-          : `"${sumatraPath}" -print-to-default -print-settings "fit,portrait" -silent "${pdfFile}"`;
+          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "noscale,portrait" -silent "${pdfFile}"`
+          : `"${sumatraPath}" -print-to-default -print-settings "noscale,portrait" -silent "${pdfFile}"`;
         await new Promise(r => exec(cmd, { timeout: 15000 }, () => r()));
-        log('✅ Impresso via SumatraPDF (fit)');
+        log('✅ Impresso via SumatraPDF (noscale)');
       } else {
         const cmd = printer
           ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo '${printer}' -WindowStyle Hidden"`
