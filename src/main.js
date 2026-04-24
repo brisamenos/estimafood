@@ -16,6 +16,7 @@ const store = new Store({
     serverUrl: 'https://estimafood.evocrm.sbs/gestor.html',
     printer: '',
     paperWidth: 80,
+    printableWidth: 0, // 0 = auto (usa pior caso seguro: 70mm para 80mm, 45mm para 58mm)
     fontSize: 12,
     nome: 'ESTIMA FOOD',
     sub: '',
@@ -261,20 +262,34 @@ function getSysPrinters() {
 async function printSilentElectron(html, opts = {}) {
   const printer = opts.printer || store.get('printer') || '';
   const paperWidth = opts.paperWidth || store.get('paperWidth') || 80;
-  const widthMm = paperWidth === 58 ? 58 : 80;
 
-  // Área IMPRIMÍVEL segura (impressoras térmicas têm borda não-imprimível ~4mm cada lado)
-  // 80mm bobina → área útil ~72mm | 58mm bobina → área útil ~48mm
-  // Usamos uma margem lateral conservadora dentro do @page para garantir que NADA seja cortado
-  const sideMarginMm = widthMm === 58 ? 3 : 4;
-  const contentWidthMm = widthMm - (sideMarginMm * 2);
-  // Fonte menor em bobina 58mm pra caber mais texto sem quebrar feio
-  const baseFontPx = widthMm === 58 ? 11 : 13;
-  const largeFontPx = widthMm === 58 ? 14 : 16;
+  // ESTRATÉGIA UNIVERSAL: gera o PDF com a largura de ÁREA IMPRIMÍVEL MÍNIMA que
+  // funciona em QUALQUER impressora térmica do mercado. Combinado com scale='fit',
+  // o driver da impressora expande o PDF até o limite da área imprimível DELA —
+  // então em impressoras com mais área disponível aproveita, e em impressoras com
+  // área menor cabe do mesmo jeito.
+  //
+  // Pior caso observado:
+  // - Bobina 80mm → área imprimível 70mm (algumas Elgin/Bematech antigas)
+  // - Bobina 58mm → área imprimível 45mm
+  //
+  // O usuário pode sobrescrever via config (store.set('printableWidth', X)) se
+  // quiser maximizar aproveitamento numa impressora específica.
+  const printableOverride = opts.printableWidth || store.get('printableWidth') || 0;
+  let widthMm;
+  if (printableOverride && printableOverride >= 20 && printableOverride <= 80) {
+    widthMm = printableOverride;
+  } else {
+    widthMm = paperWidth === 58 ? 45 : 70;
+  }
+
+  // Fonte adaptativa — bobina 58 usa fonte menor pra caber mais info
+  const baseFontPx = paperWidth === 58 ? 11 : 13;
+  const largeFontPx = paperWidth === 58 ? 14 : 16;
 
   const cleanHtml = html.includes('<html') ? html.replace(/.*<body[^>]*>/is,'').replace(/<\/body>.*/is,'') : html;
 
-  // Limpa cores do tema escuro E remove larguras fixas em px que podem estourar
+  // Limpa cores do tema escuro
   let safeHtml = cleanHtml
     .replace(/color\s*:\s*[^;"']+/gi, 'color:#000')
     .replace(/background\s*:\s*[^;"']+/gi, 'background:#fff')
@@ -289,7 +304,6 @@ async function printSilentElectron(html, opts = {}) {
       background-color: #fff !important;
       -webkit-print-color-adjust: exact !important;
       box-sizing: border-box !important;
-      /* Quebra palavras/URLs/textos longos pra NUNCA estourar a largura */
       word-wrap: break-word !important;
       overflow-wrap: anywhere !important;
       word-break: break-word !important;
@@ -304,12 +318,12 @@ async function printSilentElectron(html, opts = {}) {
       box-sizing: border-box;
       width: WIDTHmm;
       margin: 0 !important;
-      /* Padding lateral GARANTE que conteúdo fique dentro da área imprimível */
-      padding: 2mm SIDEMMmm 4mm SIDEMMmm !important;
+      /* SEM padding lateral: o PDF já está no tamanho da área imprimível.
+         O driver da impressora centraliza e a folga física do papel faz o resto. */
+      padding: 2mm 0 4mm 0 !important;
       color: #000 !important;
       overflow: hidden !important;
     }
-    /* Qualquer elemento com largura fixa inline é neutralizado */
     [style*="width:"] { max-width: 100% !important; }
     img, svg, table, div, p, span { max-width: 100% !important; }
     table { width: 100% !important; table-layout: fixed !important; border-collapse: collapse !important; }
@@ -318,19 +332,16 @@ async function printSilentElectron(html, opts = {}) {
     .pt-center { text-align: center; }
     .pt-large { font-size: LARGEPXpx; font-weight: bold; }
     .print-ticket { padding: 0; width: 100%; margin: 0; }
-    /* Linhas flex com nome+preço: nome quebra, preço fica inteiro */
     div[style*="space-between"] { display: flex !important; justify-content: space-between !important; gap: 4px; align-items: flex-start; }
     div[style*="space-between"] > span:first-child { flex: 1 1 auto; min-width: 0; word-wrap: break-word; overflow-wrap: anywhere; }
     div[style*="space-between"] > span:last-child { flex: 0 0 auto; white-space: nowrap; }
   `;
 
-  // Função helper pra aplicar todos os placeholders
   const applyVars = (css, h) => css
     .replace(/WIDTH/g, String(widthMm))
     .replace(/HEIGHT/g, String(h))
     .replace(/FONTPX/g, String(baseFontPx))
-    .replace(/LARGEPX/g, String(largeFontPx))
-    .replace(/SIDEMM/g, String(sideMarginMm));
+    .replace(/LARGEPX/g, String(largeFontPx));
 
   // PASSO 1: Mede a altura real do conteúdo
   const measureCss = applyVars(resetCSS, '2000');
@@ -385,13 +396,16 @@ async function printSilentElectron(html, opts = {}) {
     fs.writeFileSync(pdfFile, pdfBuffer);
     log('📄 PDF:', Math.round(pdfBuffer.length / 1024) + 'KB | tamanho:', widthMm + 'x' + heightMm + 'mm');
 
-    // PASSO 4: Imprime — noscale pra não criar margem
+    // PASSO 4: Imprime — usa 'fit' pro driver encaixar o PDF dentro da área imprimível.
+    // Como o PDF já saiu com a largura da área imprimível (72mm em vez de 80mm),
+    // 'fit' imprime em tamanho real sem cortar os lados. Se a impressora do cliente
+    // tiver área imprimível diferente, 'fit' ajusta proporcionalmente.
     try {
       const ptp = require('pdf-to-printer');
-      const printOpts = { scale: 'noscale', orientation: 'portrait' };
+      const printOpts = { scale: 'fit', orientation: 'portrait' };
       if (printer) printOpts.printer = printer;
       await ptp.print(pdfFile, printOpts);
-      log('✅ Impresso (noscale)' + (printer ? ' → ' + printer : ''));
+      log('✅ Impresso (fit)' + (printer ? ' → ' + printer : ''));
     } catch (ptpErr) {
       log('⚠️ pdf-to-printer falhou:', ptpErr.message);
       const { exec } = require('child_process');
@@ -410,10 +424,10 @@ async function printSilentElectron(html, opts = {}) {
       }
       if (sumatraPath) {
         const cmd = printer
-          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "noscale,portrait" -silent "${pdfFile}"`
-          : `"${sumatraPath}" -print-to-default -print-settings "noscale,portrait" -silent "${pdfFile}"`;
+          ? `"${sumatraPath}" -print-to "${printer}" -print-settings "fit,portrait" -silent "${pdfFile}"`
+          : `"${sumatraPath}" -print-to-default -print-settings "fit,portrait" -silent "${pdfFile}"`;
         await new Promise(r => exec(cmd, { timeout: 15000 }, () => r()));
-        log('✅ Impresso via SumatraPDF (noscale)');
+        log('✅ Impresso via SumatraPDF (fit)');
       } else {
         const cmd = printer
           ? `powershell -Command "Start-Process -FilePath '${pdfFile}' -Verb PrintTo '${printer}' -WindowStyle Hidden"`
@@ -980,6 +994,7 @@ function setupIPC() {
       printers: printers.map(p => p.name),
       printer: store.get('printer') || '',
       paperWidth: store.get('paperWidth'),
+      printableWidth: store.get('printableWidth') || 0,
       fontSize: store.get('fontSize'),
       nome: store.get('nome'),
       sub: store.get('sub'),
@@ -1000,6 +1015,7 @@ function setupIPC() {
   ipcMain.handle('print:saveConfig', async (_e, cfg) => {
     if (cfg.printer !== undefined)     store.set('printer', cfg.printer);
     if (cfg.paperWidth !== undefined)  store.set('paperWidth', cfg.paperWidth);
+    if (cfg.printableWidth !== undefined) store.set('printableWidth', cfg.printableWidth);
     if (cfg.fontSize !== undefined)    store.set('fontSize', cfg.fontSize);
     if (cfg.nome !== undefined)        store.set('nome', cfg.nome);
     if (cfg.sub !== undefined)         store.set('sub', cfg.sub);
@@ -1034,6 +1050,52 @@ function setupIPC() {
   ipcMain.handle('print:html', async (_e, html, opts) => {
     try {
       return await printSilentElectron(html, opts || {});
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+
+  // Calibração: imprime uma régua pra o usuário descobrir a área imprimível real
+  // da impressora dele. O usuário imprime, vê até onde foi impresso sem cortar,
+  // e ajusta printableWidth com esse valor.
+  ipcMain.handle('print:calibrate', async (_e, opts) => {
+    try {
+      const paperWidth = (opts && opts.paperWidth) || store.get('paperWidth') || 80;
+      // Gera régua de largura MÁXIMA (largura física do papel) com marcações de mm
+      // O usuário vê a primeira e a última marcação visíveis na impressão.
+      const maxMm = paperWidth;
+      let ruler = '';
+      for (let i = 0; i <= maxMm; i++) {
+        const isMajor = i % 10 === 0;
+        const isMid = i % 5 === 0;
+        const height = isMajor ? 14 : (isMid ? 9 : 5);
+        ruler += `<div style="display:inline-block;width:1mm;height:${height}px;background:#000;vertical-align:bottom;margin:0;padding:0"></div>`;
+      }
+      let labels = '';
+      for (let i = 0; i <= maxMm; i += 10) {
+        labels += `<div style="display:inline-block;width:10mm;text-align:left;font-size:8px">${i}</div>`;
+      }
+      const html = `
+        <div style="font-family:'Courier New',monospace;font-size:10px;font-weight:bold;color:#000">
+          <div style="text-align:center;font-size:13px;margin-bottom:4px">CALIBRAÇÃO DE IMPRESSÃO</div>
+          <div style="margin-bottom:4px">Papel: ${paperWidth}mm</div>
+          <hr style="border:none;border-top:1px solid #000;margin:3px 0">
+          <div style="white-space:nowrap;line-height:1;margin-bottom:1px">${ruler}</div>
+          <div style="white-space:nowrap;line-height:1;margin-top:0">${labels}</div>
+          <hr style="border:none;border-top:1px solid #000;margin:3px 0">
+          <div style="font-size:9px;line-height:1.3">
+            1. Veja até qual NÚMERO a régua foi impressa sem cortar.<br>
+            2. Digite esse número em "Largura imprimível" nas configurações.<br>
+            3. Salve e pronto — qualquer impressora térmica fica compatível.
+          </div>
+          <div style="margin-top:6px;text-align:center">|&larr; esquerda ............ direita &rarr;|</div>
+        </div>
+      `;
+      // Força largura TOTAL do papel pra régua sair completa (até ser cortada pela impressora)
+      return await printSilentElectron(html, {
+        paperWidth,
+        printableWidth: paperWidth, // sem proteção: quero ver onde corta de verdade
+      });
     } catch (e) {
       return { ok: false, error: e.message };
     }
