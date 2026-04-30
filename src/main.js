@@ -108,11 +108,17 @@ function createWindow() {
   if (serverUrl) {
     log('🌐 Carregando:', serverUrl);
 
-    // ── Auto-login: usa did-frame-finish-load com flag pra rodar UMA vez ──
-    // A versão antiga registrava listeners de webRequest que não faziam nada
-    // útil + um listener de dom-ready que rodava executeJavaScript em CADA
-    // navegação (causava travamento de teclado em alguns casos).
-    // Agora: roda só na primeira navegação, e só se realmente caiu no login.
+    // ── Auto-login: restaura sessão se cair em login.html ──
+    // Estratégia: escuta did-finish-load em TODA navegação (sem .once), mas
+    // a flag _sessionApplied garante que só aplicamos uma vez. Isso é
+    // necessário porque o redirect gestor.html → login.html acontece DEPOIS
+    // do primeiro did-finish-load (gestor-core.js detecta sessão vazia e
+    // só aí redireciona). Se usássemos .once, perderíamos o evento do login.
+    //
+    // Diferença vs versão antiga: a antiga usava dom-ready e rodava
+    // executeJavaScript em TODA navegação independente da URL — isso
+    // bloqueava teclado em PCs lentos. Aqui só rodamos código se a URL
+    // contém login.html, e marcamos _sessionApplied=true imediatamente.
     const savedSession = store.get('_savedSession');
     let _sessionApplied = false;
     if (savedSession) {
@@ -124,19 +130,19 @@ function createWindow() {
         const applySession = () => {
           if (_sessionApplied || !mainWindow || mainWindow.isDestroyed()) return;
           const currentUrl = mainWindow.webContents.getURL();
-          if (currentUrl.includes('login.html')) {
-            const ss = store.get('_savedSession');
-            if (!ss || (Date.now() - (ss.ts || 0)) >= 30 * 24 * 60 * 60 * 1000) return;
-            _sessionApplied = true;
-            log('[SESSION] Redirecionado para login — restaurando sessão');
-            const ssStr = JSON.stringify(JSON.stringify(ss));
-            mainWindow.webContents.executeJavaScript(
-              'try{sessionStorage.setItem("sys_session",' + ssStr + ');window.location.replace("' + serverUrl + '")}catch(e){}'
-            ).catch(() => {});
-          }
+          if (!currentUrl.includes('login.html')) return; // ainda não chegou no login
+          const ss = store.get('_savedSession');
+          if (!ss || (Date.now() - (ss.ts || 0)) >= 30 * 24 * 60 * 60 * 1000) return;
+          _sessionApplied = true;
+          log('[SESSION] Restaurando sessão e voltando pro gestor');
+          const ssStr = JSON.stringify(JSON.stringify(ss));
+          mainWindow.webContents.executeJavaScript(
+            'try{sessionStorage.setItem("sys_session",' + ssStr + ');window.location.replace("' + serverUrl + '")}catch(e){}'
+          ).catch(() => {});
         };
-        // Roda no did-finish-load (apenas a primeira vez)
-        mainWindow.webContents.once('did-finish-load', applySession);
+        // Escuta EM TODA navegação (sem .once). A flag _sessionApplied
+        // garante que executamos uma única vez quando cairmos em login.html.
+        mainWindow.webContents.on('did-finish-load', applySession);
       }
     }
 
