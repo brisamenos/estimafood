@@ -84,4 +84,9 @@ contextBridge.exposeInMainWorld('ElectronPrint', {
   saveSession:  (session) => ipcRenderer.invoke('app:saveSession', session),
   getSession:   ()        => ipcRenderer.invoke('app:getSession'),
   clearSession: ()        => ipcRenderer.invoke('app:clearSession'),
+
+  /** Estado atual do auto-start no Windows. @returns {Promise<{supported, enabled}>} */
+  getAutoStart: () => ipcRenderer.invoke('app:getAutoStart'),
+  /** Liga/desliga inicialização junto com Windows. @param {boolean} enabled */
+  setAutoStart: (enabled) => ipcRenderer.invoke('app:setAutoStart', !!enabled),
 });

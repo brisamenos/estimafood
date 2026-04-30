@@ -10,6 +10,16 @@ const fs = require('fs');
 const os = require('os');
 const Store = require('electron-store');
 
+// ── Flags de inicialização (precisam vir ANTES do app.whenReady) ──
+// Desativa throttling de timers em janela escondida — sem isso, o polling
+// do print-queue PARA quando o app fica minimizado/em segundo plano e
+// pedidos novos demoram pra imprimir.
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+// Reduz uso de memória em PCs com pouca RAM (lojas usam PCs simples)
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+
 // ── Config persistente ──────────────────────────────────────
 const store = new Store({
   defaults: {
@@ -27,9 +37,15 @@ const store = new Store({
     printMethod: 'electron', // 'electron' | 'escpos-usb' | 'escpos-network'
     networkPrinterIp: '',
     networkPrinterPort: 9100,
-    windowBounds: { width: 1280, height: 800 }
+    windowBounds: { width: 1280, height: 800 },
+    disableGpu: false, // usuário pode ligar manualmente se PC antigo trava
   }
 });
+
+// Aplica disableGpu se usuário ativou (PCs com GPU antiga problemática)
+if (store.get('disableGpu')) {
+  try { app.disableHardwareAcceleration(); } catch {}
+}
 
 // ── Variáveis globais ───────────────────────────────────────
 let mainWindow = null;
@@ -50,6 +66,17 @@ function log(...args) {
   const ts = new Date().toLocaleTimeString('pt-BR');
   console.log(`[${ts}]`, ...args);
 }
+
+// ── Captura erros não tratados (evita estado fantasma) ──────
+// Antes da v1.10.10: qualquer rejection silenciosa em handlers async deixava
+// o app num estado quebrado (especialmente impressão e polling). Agora
+// pelo menos logamos. Seguimos respondendo IPCs.
+process.on('unhandledRejection', (reason) => {
+  try { log('⚠️ unhandledRejection:', reason && reason.message ? reason.message : reason); } catch {}
+});
+process.on('uncaughtException', (err) => {
+  try { log('⚠️ uncaughtException:', err && err.message ? err.message : err); } catch {}
+});
 
 // ── Janela principal ────────────────────────────────────────
 function createWindow() {
@@ -81,65 +108,72 @@ function createWindow() {
   if (serverUrl) {
     log('🌐 Carregando:', serverUrl);
 
-    // ── Auto-login: injeta sessão ANTES dos scripts da página ──
-    // did-finish-load é TARDE DEMAIS (gestor-core.js já redirecionou para login.html).
-    // Usamos webRequest para injetar um <script> no início do HTML que restaura a sessão
-    // antes de qualquer outro script executar.
+    // ── Auto-login: usa did-frame-finish-load com flag pra rodar UMA vez ──
+    // A versão antiga registrava listeners de webRequest que não faziam nada
+    // útil + um listener de dom-ready que rodava executeJavaScript em CADA
+    // navegação (causava travamento de teclado em alguns casos).
+    // Agora: roda só na primeira navegação, e só se realmente caiu no login.
     const savedSession = store.get('_savedSession');
+    let _sessionApplied = false;
     if (savedSession) {
       const age = Date.now() - (savedSession.ts || 0);
-      if (age < 30 * 24 * 60 * 60 * 1000) {
-        const sessionStr = JSON.stringify(JSON.stringify(savedSession));
-        const injectScript = `<script>try{sessionStorage.setItem("sys_session",${sessionStr})}catch(e){}</script>`;
-        const { session: ses } = mainWindow.webContents;
-        ses.webRequest.onBeforeRequest({ urls: [serverUrl.replace(/\/[^/]*$/, '') + '/*'] }, (details, cb) => {
-          cb({ cancel: false });
-        });
-        // Injeta no <head> assim que o HTML chegar
-        ses.webRequest.onHeadersReceived((details, cb) => {
-          cb({ responseHeaders: details.responseHeaders });
-        });
-        // Usa executeJavaScript no dom-ready com proteção contra redirecionamento
-        mainWindow.webContents.on('dom-ready', () => {
+      if (age >= 30 * 24 * 60 * 60 * 1000) {
+        store.delete('_savedSession');
+      } else {
+        log('[SESSION] Sessão salva encontrada:', savedSession.nome || '?');
+        const applySession = () => {
+          if (_sessionApplied || !mainWindow || mainWindow.isDestroyed()) return;
           const currentUrl = mainWindow.webContents.getURL();
-          // Se já redirecionou para login.html, força voltar com a sessão
           if (currentUrl.includes('login.html')) {
             const ss = store.get('_savedSession');
-            if (ss && (Date.now() - (ss.ts || 0)) < 30 * 24 * 60 * 60 * 1000) {
-              log('[SESSION] Redirecionado para login — forçando restauração');
-              const ssStr = JSON.stringify(JSON.stringify(ss));
-              mainWindow.webContents.executeJavaScript(
-                'try{sessionStorage.setItem("sys_session",' + ssStr + ');window.location.href="' + serverUrl + '"}catch(e){}'
-              ).catch(() => {});
-            }
+            if (!ss || (Date.now() - (ss.ts || 0)) >= 30 * 24 * 60 * 60 * 1000) return;
+            _sessionApplied = true;
+            log('[SESSION] Redirecionado para login — restaurando sessão');
+            const ssStr = JSON.stringify(JSON.stringify(ss));
+            mainWindow.webContents.executeJavaScript(
+              'try{sessionStorage.setItem("sys_session",' + ssStr + ');window.location.replace("' + serverUrl + '")}catch(e){}'
+            ).catch(() => {});
           }
-        });
-        log('[SESSION] Sessão salva encontrada:', savedSession.nome || '?');
-      } else {
-        store.delete('_savedSession');
+        };
+        // Roda no did-finish-load (apenas a primeira vez)
+        mainWindow.webContents.once('did-finish-load', applySession);
       }
     }
 
     mainWindow.loadURL(serverUrl).catch(err => {
       log('❌ Erro ao carregar URL:', err.message);
-      mainWindow.loadFile(path.join(__dirname, 'offline.html'));
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadFile(path.join(__dirname, 'offline.html'));
+      }
     });
   } else {
     mainWindow.loadFile(path.join(__dirname, 'setup.html'));
   }
 
-  // Show when ready
+  // Show when ready (mas respeita --hidden quando iniciado com Windows)
+  const startedHidden = process.argv.includes('--hidden');
   mainWindow.once('ready-to-show', () => {
+    if (startedHidden) {
+      log('🫥 Iniciado com --hidden, ficando na bandeja');
+      // Nem mostra a janela. App fica na tray. Usuário abre clicando no ícone.
+      return;
+    }
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.focus(); // Garante foco no webContents (fix: teclado travado)
     if (isDev) mainWindow.webContents.openDevTools();
   });
 
-  // Save window bounds
+  // Save window bounds (com debounce — antes salvava em cada pixel de resize)
+  let _boundsTimer = null;
   mainWindow.on('resize', () => {
-    const [w, h] = mainWindow.getSize();
-    store.set('windowBounds', { width: w, height: h });
+    if (_boundsTimer) clearTimeout(_boundsTimer);
+    _boundsTimer = setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const [w, h] = mainWindow.getSize();
+        store.set('windowBounds', { width: w, height: h });
+      }
+    }, 500);
   });
 
   // Fix: ao restaurar da bandeja, força foco no webContents pra evitar teclado travado
@@ -358,20 +392,31 @@ async function printSilentElectron(html, opts = {}) {
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
 
-  await measureWin.loadFile(measureFile);
-  // Espera DOM + fontes carregarem pra scrollHeight ser preciso
-  await new Promise(r => setTimeout(r, 300));
-  await measureWin.webContents.executeJavaScript('document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()').catch(() => {});
-  await new Promise(r => setTimeout(r, 200));
+  let contentHeight;
+  try {
+    await measureWin.loadFile(measureFile);
+    // Espera DOM + fontes carregarem pra scrollHeight ser preciso
+    await new Promise(r => setTimeout(r, 300));
+    await measureWin.webContents.executeJavaScript('document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()').catch(() => {});
+    await new Promise(r => setTimeout(r, 200));
 
-  const contentHeight = await measureWin.webContents.executeJavaScript(
-    'Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, document.body.getBoundingClientRect().height)'
-  );
+    contentHeight = await measureWin.webContents.executeJavaScript(
+      'Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, document.body.getBoundingClientRect().height)'
+    );
+  } catch (measureErr) {
+    log('⚠️ Medição falhou, usando altura estimada:', measureErr.message);
+    // Fallback: estima 800px (caberá ~210mm) — corta no fim mas pelo menos imprime
+    contentHeight = 800;
+  } finally {
+    // Garante close mesmo se algo deu erro acima (evita leak de BrowserWindow)
+    try { if (!measureWin.isDestroyed()) measureWin.close(); } catch {}
+    try { fs.unlinkSync(measureFile); } catch {}
+  }
+  // Sanidade: se contentHeight veio NaN/inválido, usa fallback
+  if (!Number.isFinite(contentHeight) || contentHeight <= 0) contentHeight = 800;
   // 96 DPI: 1mm = 3.7795275px. Folga mínima de 1mm só pra não cortar última linha.
   const rawHeight = Math.ceil(contentHeight / 3.7795275) + 1;
   const heightMm = Math.max(rawHeight, 20); // altura mínima de 20mm
-  measureWin.close();
-  try { fs.unlinkSync(measureFile); } catch {}
 
   log('🖨️ Medido:', contentHeight + 'px →', heightMm + 'mm | largura:', widthMm + 'mm');
 
@@ -825,12 +870,6 @@ async function printRawEscPos(order, cfg) {
   const tmpFile = path.join(os.tmpdir(), 'ef-raw-' + Date.now() + '.bin');
   fs.writeFileSync(tmpFile, data);
 
-  // DEBUG: salva cópia
-  try {
-    const desktop = path.join(os.homedir(), 'Desktop');
-    fs.writeFileSync(path.join(desktop, 'EstimaFood-DEBUG.bin'), data);
-  } catch {}
-
   const { exec } = require('child_process');
 
   if (process.platform === 'win32') {
@@ -1228,43 +1267,57 @@ function startPrintQueuePolling() {
   if (!baseUrl) { log('[PQ] Sem URL base, polling não iniciado'); return; }
 
   _pqActive = true;
+  let _pqFailCount = 0; // backoff exponencial em caso de erro
   log('[PQ] ✅ Polling iniciado |', baseUrl);
 
-  // Heartbeat a cada 15s
+  // Heartbeat a cada 30s (antes era 15s — desnecessariamente agressivo)
   const hb = () => {
+    if (!_pqActive) return;
     const tid = _pqGetTenantId();
     if (!tid) return;
     _pqRequest('POST', baseUrl, '/api/print-queue/heartbeat', tid, { printer: 'EstimaFoodPrint' }).catch(() => {});
   };
   hb();
-  _pqHbTimer = setInterval(hb, 15000);
+  _pqHbTimer = setInterval(hb, 30000);
 
-  // Polling a cada 4s
+  // Polling com backoff. Sem tenant: aguarda 10s e tenta de novo (não chega no servidor).
+  // Com erro: backoff exponencial até 60s pra não martelar servidor offline.
   const poll = async () => {
     if (!_pqActive) return;
     const tid = _pqGetTenantId();
-    if (tid) {
-      try {
-        const res = await _pqRequest('GET', baseUrl, '/api/print-queue/pending', tid);
-        if (Array.isArray(res.body) && res.body.length) {
-          log(`[PQ] 📋 ${res.body.length} job(s) pendente(s)`);
-          for (const job of res.body) {
-            try {
-              await _pqPrintJob(job);
-              await _pqRequest('PATCH', baseUrl, `/api/print-queue/job/${job.id}/done`, tid, { status: 'done' });
-              _pqJobCount++;
-              log(`[PQ] ✅ Job #${job.id} impresso! (${job.tipo || 'geral'})`);
-            } catch (e) {
-              log(`[PQ] ❌ Job #${job.id} falhou:`, e.message);
-              try { await _pqRequest('PATCH', baseUrl, `/api/print-queue/job/${job.id}/done`, tid, { status: 'error', error: e.message }); } catch {}
-            }
+
+    // Sem tenant ainda: agenda nova tentativa em 10s e sai (não consome rede)
+    if (!tid) {
+      _pqTimer = setTimeout(poll, 10000);
+      return;
+    }
+
+    try {
+      const res = await _pqRequest('GET', baseUrl, '/api/print-queue/pending', tid);
+      _pqFailCount = 0; // resetou erro
+      if (Array.isArray(res.body) && res.body.length) {
+        log(`[PQ] 📋 ${res.body.length} job(s) pendente(s)`);
+        for (const job of res.body) {
+          if (!_pqActive) break; // app fechando
+          try {
+            await _pqPrintJob(job);
+            await _pqRequest('PATCH', baseUrl, `/api/print-queue/job/${job.id}/done`, tid, { status: 'done' }).catch(() => {});
+            _pqJobCount++;
+            log(`[PQ] ✅ Job #${job.id} impresso! (${job.tipo || 'geral'})`);
+          } catch (e) {
+            log(`[PQ] ❌ Job #${job.id} falhou:`, e.message);
+            try { await _pqRequest('PATCH', baseUrl, `/api/print-queue/job/${job.id}/done`, tid, { status: 'error', error: String(e.message || '').slice(0, 200) }); } catch {}
           }
         }
-      } catch (e) {
-        // Silencioso — servidor offline ou sem conexão
       }
+    } catch (e) {
+      _pqFailCount = Math.min(_pqFailCount + 1, 6);
     }
-    _pqTimer = setTimeout(poll, 4000);
+
+    if (!_pqActive) return;
+    // Intervalo adaptativo: 4s normal, vai até 60s em rede ruim
+    const nextDelay = _pqFailCount === 0 ? 4000 : Math.min(4000 * Math.pow(2, _pqFailCount), 60000);
+    _pqTimer = setTimeout(poll, nextDelay);
   };
   poll();
 }
@@ -1360,47 +1413,81 @@ function setupUpdater() {
 }
 
 // ── Auto-start com Windows ──────────────────────────────────
+// Versão antiga só ligava se autoStart=true, deixando registry órfão se mudou
+// pra false. Agora sempre re-aplica o estado correto, e usa caminho explícito
+// do .exe (NSIS oneClick reinstala em path novo a cada update — sem path
+// explícito o registry pode apontar pra exe que não existe mais).
 function setupAutoStart() {
   if (process.platform !== 'win32') return;
   try {
+    const enabled = !!store.get('autoStart');
+    const exePath = app.getPath('exe');
     app.setLoginItemSettings({
-      openAtLogin: store.get('autoStart'),
+      openAtLogin: enabled,
       openAsHidden: true,
+      path: exePath,
       args: ['--hidden'],
     });
+    // Verifica se ficou bem aplicado (em alguns Windows o registry rejeita silenciosamente)
+    const status = app.getLoginItemSettings({ path: exePath, args: ['--hidden'] });
+    if (enabled !== status.openAtLogin) {
+      log('⚠️ AutoStart: config solicitada=' + enabled + ' mas sistema retornou=' + status.openAtLogin);
+    } else {
+      log('🚀 AutoStart:', enabled ? 'habilitado' : 'desabilitado', '|', exePath);
+    }
   } catch (e) {
     log('⚠️ AutoStart erro:', e.message);
   }
 }
 
-// ── App lifecycle ───────────────────────────────────────────
-app.whenReady().then(() => {
-  setupIPC();
-  createWindow();
-  createTray();
-  setupAutoStart();
-  startPrintQueuePolling(); // Inicia polling do print-queue
-
-  // Auto-updater só em produção
-  if (!isDev) setupUpdater();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    else if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.focus(); }
-  });
-
-  log('✅ EstimaFood Print iniciado | versão:', app.getVersion());
-});
-
-app.on('before-quit', () => { isQuitting = true; });
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin' && !store.get('minimizeToTray')) {
-    app.quit();
+// IPC pra UI ligar/desligar autostart e ver status atual
+ipcMain.handle('app:getAutoStart', () => {
+  if (process.platform !== 'win32') return { supported: false, enabled: false };
+  try {
+    const exePath = app.getPath('exe');
+    const status = app.getLoginItemSettings({ path: exePath, args: ['--hidden'] });
+    return { supported: true, enabled: !!status.openAtLogin, stored: !!store.get('autoStart') };
+  } catch (e) {
+    return { supported: true, enabled: false, error: e.message };
   }
 });
+ipcMain.handle('app:setAutoStart', (_e, enabled) => {
+  store.set('autoStart', !!enabled);
+  setupAutoStart();
+  return { ok: true };
+});
 
-// Impede múltiplas instâncias
+// Liga/desliga GPU acceleration (precisa restart pra valer)
+ipcMain.handle('app:getDisableGpu', () => ({ enabled: !!store.get('disableGpu') }));
+ipcMain.handle('app:setDisableGpu', (_e, enabled) => {
+  store.set('disableGpu', !!enabled);
+  return { ok: true, needsRestart: true };
+});
+
+// ── Limpa arquivos temporários órfãos do app ────────────────
+// Se o app fechou no meio de uma impressão, sobram .pdf/.bin/.html no tmpdir.
+// Em meses isso enche o disco. Limpamos arquivos > 1h.
+function _cleanupTmpFiles() {
+  try {
+    const tmpDir = os.tmpdir();
+    const cutoff = Date.now() - 60 * 60 * 1000; // 1 hora
+    const files = fs.readdirSync(tmpDir);
+    let removed = 0;
+    for (const f of files) {
+      if (!/^ef-(measure|print|receipt|raw)-\d+\.(html|pdf|bin|ps1)$/.test(f)) continue;
+      try {
+        const fp = path.join(tmpDir, f);
+        const st = fs.statSync(fp);
+        if (st.mtimeMs < cutoff) { fs.unlinkSync(fp); removed++; }
+      } catch {}
+    }
+    if (removed) log('🧹 Limpos', removed, 'arquivos temporários antigos');
+  } catch {}
+}
+
+// ── Impede múltiplas instâncias (DEVE vir antes de whenReady) ──
+// Se outra instância já está rodando, pedimos pra ela mostrar a janela
+// e saímos imediatamente — sem rodar setupIPC nem criar janela duplicada.
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -1408,9 +1495,37 @@ if (!gotLock) {
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
+      if (!mainWindow.isVisible()) mainWindow.show();
       mainWindow.focus();
       mainWindow.webContents.focus();
+    }
+  });
+
+  // ── App lifecycle ───────────────────────────────────────────
+  app.whenReady().then(() => {
+    _cleanupTmpFiles();
+    setupIPC();
+    createWindow();
+    createTray();
+    setupAutoStart();
+    startPrintQueuePolling(); // Inicia polling do print-queue
+
+    // Auto-updater só em produção
+    if (!isDev) setupUpdater();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      else if (mainWindow) { mainWindow.show(); mainWindow.focus(); mainWindow.webContents.focus(); }
+    });
+
+    log('✅ EstimaFood Print iniciado | versão:', app.getVersion());
+  });
+
+  app.on('before-quit', () => { isQuitting = true; });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin' && !store.get('minimizeToTray')) {
+      app.quit();
     }
   });
 }
