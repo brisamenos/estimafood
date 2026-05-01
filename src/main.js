@@ -96,10 +96,6 @@ function createWindow() {
       nodeIntegration: false,
       webSecurity: true,
       spellcheck: false,
-      // Sem isso, ao perder foco temporariamente (ex: durante impressão silenciosa
-      // que cria BrowserWindows offscreen), o renderer entra em estado throttled
-      // e o input fica travado até o usuário clicar de novo na janela.
-      backgroundThrottling: false,
     },
     show: false,
   });
@@ -228,22 +224,6 @@ function createWindow() {
       .pwa-install-banner, .update-toast { display: none !important; }
     `).catch(() => {});
   });
-
-  // ══════════════════════════════════════════════════════════
-  // Rede de segurança contra travamento de teclado
-  // ══════════════════════════════════════════════════════════
-  // Mesmo com withFocusPreserved nas impressões, casos esquina podem deixar
-  // o webContents num estado em que ele não recebe input. Quando o usuário
-  // clica de volta na janela (focus event), forçamos refocus do webContents.
-  mainWindow.on('focus', () => {
-    setImmediate(() => {
-      try {
-        if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isFocused()) {
-          mainWindow.webContents.focus();
-        }
-      } catch {}
-    });
-  });
 }
 
 // ── System Tray ─────────────────────────────────────────────
@@ -319,79 +299,7 @@ function getSysPrinters() {
   return mainWindow.webContents.getPrintersAsync();
 }
 
-// ══════════════════════════════════════════════════════════════
-// CORREÇÃO DO TRAVAMENTO DE TECLADO
-// ══════════════════════════════════════════════════════════════
-// Sintoma: depois de imprimir (especialmente impressões automáticas em
-// background via print-queue), o foco da janela principal é perdido e o
-// teclado fica "travado" — o usuário precisa fechar/reabrir o app pra
-// conseguir digitar de novo.
-//
-// Causa: cada chamada a printSilentElectron cria 2 BrowserWindows offscreen
-// (measureWin + printWin). No Windows, quando uma BrowserWindow é criada e
-// destruída em rápida sucessão, o foco do teclado pode ser desviado para a
-// área de trabalho — mesmo com show: false. Combinado com renderer
-// throttling quando a janela perde foco, o input HTML fica não-responsivo.
-//
-// Solução em camadas:
-//   1) backgroundThrottling: false na main window (acima)
-//   2) Janelas offscreen criadas via createOffscreenWindow() com flags que
-//      não roubam foco (skipTaskbar, focusable: false, parent: mainWindow)
-//   3) withFocusPreserved() guarda o estado de foco antes e restaura depois
-// ══════════════════════════════════════════════════════════════
-
-// Cria BrowserWindow offscreen pra impressão sem roubar foco da main
-function createOffscreenWindow(opts = {}) {
-  return new BrowserWindow({
-    show: false,
-    width: opts.width || 400,
-    height: opts.height || 2000,
-    // Estas flags juntas evitam que a janela apareça no Alt-Tab e roube foco
-    skipTaskbar: true,
-    focusable: false,
-    // Parent garante que ao destruir a janela offscreen, o foco volte pra mainWindow
-    // (apenas se mainWindow ainda existir e não estiver destruída)
-    parent: (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : undefined,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      // Não pinta enquanto escondida — economiza recursos e reduz interferência
-      backgroundThrottling: true,
-      offscreen: false, // offscreen renderer tem bugs com fontes; melhor janela hidden normal
-    },
-  });
-}
-
-// Executa fn() preservando o foco do teclado na mainWindow.
-// Se a main estava focada antes, garante que volte a estar depois — independente
-// do que fn() fez (criou janelas, abriu PDF, etc).
-async function withFocusPreserved(fn) {
-  const wasMainFocused = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
-  try {
-    return await fn();
-  } finally {
-    // Sempre restaura foco se: a main existe, está visível, e estava focada antes
-    // (ou se nenhuma outra janela visível ganhou foco — caso comum em background)
-    setImmediate(() => {
-      try {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        if (!mainWindow.isVisible()) return;
-        // Restaura foco se estava focada OU se nenhuma outra janela está focada agora
-        const focusedNow = BrowserWindow.getFocusedWindow();
-        if (wasMainFocused || !focusedNow) {
-          mainWindow.focus();
-          mainWindow.webContents.focus();
-        }
-      } catch {}
-    });
-  }
-}
-
 async function printSilentElectron(html, opts = {}) {
-  return await withFocusPreserved(() => _printSilentElectronInner(html, opts));
-}
-
-async function _printSilentElectronInner(html, opts = {}) {
   const printer = opts.printer || store.get('printer') || '';
   const paperWidth = opts.paperWidth || store.get('paperWidth') || 80;
 
@@ -485,7 +393,10 @@ async function _printSilentElectronInner(html, opts = {}) {
   // Largura da janela em px = largura EXATA do PDF (sem folga).
   // Assim o scrollHeight bate com a altura real que o conteúdo vai ter no PDF.
   const measureWinWidth = Math.round(widthMm / 25.4 * 96);
-  const measureWin = createOffscreenWindow({ width: measureWinWidth, height: 4000 });
+  const measureWin = new BrowserWindow({
+    show: false, width: measureWinWidth, height: 4000,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
 
   let contentHeight;
   try {
@@ -521,7 +432,10 @@ async function _printSilentElectronInner(html, opts = {}) {
   const printFile = path.join(os.tmpdir(), 'ef-print-' + Date.now() + '.html');
   fs.writeFileSync(printFile, printHtml, 'utf-8');
 
-  const printWin = createOffscreenWindow({ width: measureWinWidth, height: 2000 });
+  const printWin = new BrowserWindow({
+    show: false, width: measureWinWidth, height: 2000,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
 
   try {
     await printWin.loadFile(printFile);
